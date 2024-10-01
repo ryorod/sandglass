@@ -1,6 +1,9 @@
 import React, { useEffect, useRef } from "react";
 import * as THREE from "three";
 import * as RAPIER from "@dimforge/rapier3d-compat";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { EXRLoader } from "three/examples/jsm/loaders/EXRLoader.js";
+import { PMREMGenerator } from "three";
 
 const App: React.FC = () => {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -11,6 +14,8 @@ const App: React.FC = () => {
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rapierWorldRef = useRef<RAPIER.World | null>(null);
   const animationFrameIdRef = useRef<number | null>(null);
+  const sandMeshesRef = useRef<THREE.Mesh[]>([]);
+  const sandRigidBodiesRef = useRef<RAPIER.RigidBody[]>([]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -30,13 +35,8 @@ const App: React.FC = () => {
         if (canceled) return; // クリーンアップされた場合は何もしない
 
         // シーン、カメラ、レンダラーの設定
-        const renderer = new THREE.WebGLRenderer({ antialias: true });
-        renderer.setSize(mount.clientWidth, mount.clientHeight);
-        renderer.setPixelRatio(window.devicePixelRatio);
-        renderer.setClearColor(0x20252f, 1); // 背景色を設定
-        mount.appendChild(renderer.domElement);
-
         const scene = new THREE.Scene();
+        sceneRef.current = scene;
 
         const camera = new THREE.PerspectiveCamera(
           75,
@@ -45,6 +45,14 @@ const App: React.FC = () => {
           1000
         );
         camera.position.z = 10;
+        cameraRef.current = camera;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(mount.clientWidth, mount.clientHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setClearColor(0x20252f, 1); // 背景色を設定
+        mount.appendChild(renderer.domElement);
+        rendererRef.current = renderer;
 
         // 照明の追加
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
@@ -56,116 +64,86 @@ const App: React.FC = () => {
 
         // Rapier の物理ワールドを作成
         const rapierWorld = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+        rapierWorldRef.current = rapierWorld;
 
-        // ガラスの素材
-        const glassMaterial = new THREE.MeshStandardMaterial({
-          color: 0xaaaaaa,
-          metalness: 0.1,
-          roughness: 0.5,
-          opacity: 0.5,
-          transparent: true,
-        });
-        const sandMaterial = new THREE.MeshStandardMaterial({
-          color: 0xffd700,
-        });
+        // 環境マップの読み込み
+        const environmentMap = await loadEnvironment(renderer, scene);
 
-        // 砂時計のビジュアルメッシュを作成
-        const topGlassGeometry = new THREE.CylinderGeometry(2, 2, 4, 32);
-        const topGlassMesh = new THREE.Mesh(topGlassGeometry, glassMaterial);
-        topGlassMesh.position.y = 2;
-        scene.add(topGlassMesh);
+        // GLBモデルの読み込み
+        const gltfLoader = new GLTFLoader();
+        const glbPath = "/model/sandglass.glb"; // GLBファイルのパスを指定
 
-        const bottomGlassGeometry = new THREE.CylinderGeometry(2, 2, 4, 32);
-        const bottomGlassMesh = new THREE.Mesh(
-          bottomGlassGeometry,
-          glassMaterial
+        gltfLoader.load(
+          glbPath,
+          (gltf) => {
+            const sandglassModel = gltf.scene;
+            scene.add(sandglassModel);
+
+            // ガラスマテリアルの適用とコライダーの設定
+            sandglassModel.traverse((child) => {
+              if ((child as THREE.Mesh).isMesh) {
+                const mesh = child as THREE.Mesh;
+
+                // ガラスマテリアルの適用
+                mesh.material = new THREE.MeshPhysicalMaterial({
+                  color: 0xffffff,
+                  metalness: 0,
+                  roughness: 0,
+                  opacity: 1,
+                  transparent: true,
+                  transmission: 1, // ガラスのように透明にする
+                  thickness: 0.1, // ガラスの厚み
+                  envMap: environmentMap,
+                  envMapIntensity: 1,
+                  ior: 1.5, // 屈折率
+                });
+
+                // 内側の面にコライダーを設定
+                if (mesh.name === "inner") {
+                  const colliderDesc = createTrimeshCollider(mesh);
+                  rapierWorld.createCollider(colliderDesc);
+                }
+              }
+            });
+
+            // 砂粒子を生成
+            generateSandParticles(scene, rapierWorld);
+          },
+          undefined,
+          (error) => {
+            console.error(
+              "GLBモデルの読み込み中にエラーが発生しました:",
+              error
+            );
+          }
         );
-        bottomGlassMesh.position.y = -2;
-        scene.add(bottomGlassMesh);
-
-        const middleGlassGeometry = new THREE.CylinderGeometry(0.2, 0.2, 1, 32);
-        const middleGlassMesh = new THREE.Mesh(
-          middleGlassGeometry,
-          glassMaterial
-        );
-        scene.add(middleGlassMesh);
-
-        // オイラー角から四元数を生成
-        const threeQuaternion = new THREE.Quaternion();
-        threeQuaternion.setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0));
-
-        // Rapier.js の Rotation 型の四元数を作成
-        const rotation = new RAPIER.Quaternion(
-          threeQuaternion.x,
-          threeQuaternion.y,
-          threeQuaternion.z,
-          threeQuaternion.w
-        );
-
-        // ガラスの物理コライダーを作成（静的）
-        const topGlassColliderDesc = RAPIER.ColliderDesc.cylinder(2, 2)
-          .setTranslation(0, 2, 0)
-          .setRotation(rotation);
-        rapierWorld.createCollider(topGlassColliderDesc);
-
-        const bottomGlassColliderDesc = RAPIER.ColliderDesc.cylinder(2, 2)
-          .setTranslation(0, -2, 0)
-          .setRotation(rotation);
-        rapierWorld.createCollider(bottomGlassColliderDesc);
-
-        const middleGlassColliderDesc = RAPIER.ColliderDesc.cylinder(0.2, 0.5)
-          .setTranslation(0, 0, 0)
-          .setRotation(rotation);
-        rapierWorld.createCollider(middleGlassColliderDesc);
-
-        // 砂粒を生成
-        const sandMeshes: THREE.Mesh[] = [];
-        const sandRigidBodies: RAPIER.RigidBody[] = [];
-        const numSand = 200;
-
-        for (let i = 0; i < numSand; i++) {
-          // Three.js のメッシュ
-          const sphereGeometry = new THREE.SphereGeometry(0.1, 8, 8);
-          const sandMesh = new THREE.Mesh(sphereGeometry, sandMaterial);
-
-          // ランダムな位置に配置
-          sandMesh.position.set(
-            (Math.random() - 0.5) * 1.5,
-            Math.random() * 3 + 1,
-            (Math.random() - 0.5) * 1.5
-          );
-          scene.add(sandMesh);
-          sandMeshes.push(sandMesh);
-
-          // Rapier のリジッドボディ
-          const rigidBodyDesc = RAPIER.RigidBodyDesc.dynamic().setTranslation(
-            sandMesh.position.x,
-            sandMesh.position.y,
-            sandMesh.position.z
-          );
-          const rigidBody = rapierWorld.createRigidBody(rigidBodyDesc);
-
-          // コライダー
-          const colliderDesc = RAPIER.ColliderDesc.ball(0.1);
-          rapierWorld.createCollider(colliderDesc, rigidBody);
-
-          sandRigidBodies.push(rigidBody);
-        }
 
         // アニメーションループ
         const animate = () => {
           if (canceled) return;
 
-          rapierWorld.step();
+          if (
+            !rendererRef.current ||
+            !sceneRef.current ||
+            !cameraRef.current ||
+            !rapierWorldRef.current
+          )
+            return;
 
-          // Three.js のメッシュを物理シミュレーションに合わせて更新
-          for (let i = 0; i < sandMeshes.length; i++) {
-            const rigidBody = sandRigidBodies[i];
+          rapierWorldRef.current.step();
+
+          // 砂粒子の位置と回転を更新
+          for (let i = 0; i < sandMeshesRef.current.length; i++) {
+            const rigidBody = sandRigidBodiesRef.current[i];
             const position = rigidBody.translation();
             const rotation = rigidBody.rotation();
 
-            sandMeshes[i].position.set(position.x, position.y, position.z);
-            sandMeshes[i].quaternion.set(
+            sandMeshesRef.current[i].position.set(
+              position.x,
+              position.y,
+              position.z
+            );
+            sandMeshesRef.current[i].quaternion.set(
               rotation.x,
               rotation.y,
               rotation.z,
@@ -173,20 +151,123 @@ const App: React.FC = () => {
             );
           }
 
-          renderer.render(scene, camera);
+          rendererRef.current.render(sceneRef.current, cameraRef.current);
           animationFrameIdRef.current = requestAnimationFrame(animate);
         };
 
         animate();
-
-        // レンダラー、シーン、カメラ、物理ワールドをRefに保存
-        rendererRef.current = renderer;
-        sceneRef.current = scene;
-        cameraRef.current = camera;
-        rapierWorldRef.current = rapierWorld;
       } catch (error) {
         console.error("初期化中にエラーが発生しました:", error);
       }
+    };
+
+    // 環境マップの読み込み関数
+    const loadEnvironment = async (
+      renderer: THREE.WebGLRenderer,
+      scene: THREE.Scene
+    ): Promise<THREE.Texture> => {
+      return new Promise((resolve, reject) => {
+        const exrLoader = new EXRLoader();
+        exrLoader.load(
+          "/tex/kloppenheim_06_puresky_4k.exr", // EXRファイルのパスを指定
+          (texture) => {
+            texture.mapping = THREE.EquirectangularReflectionMapping;
+
+            const pmremGenerator = new PMREMGenerator(renderer);
+            pmremGenerator.compileEquirectangularShader();
+
+            const envMap = pmremGenerator.fromEquirectangular(texture).texture;
+            scene.environment = envMap;
+
+            texture.dispose();
+            pmremGenerator.dispose();
+
+            resolve(envMap);
+          },
+          undefined,
+          (error) => {
+            console.error(
+              "環境マップの読み込み中にエラーが発生しました:",
+              error
+            );
+            reject(error);
+          }
+        );
+      });
+    };
+
+    // Trimeshコライダーを作成する関数
+    const createTrimeshCollider = (mesh: THREE.Mesh): RAPIER.ColliderDesc => {
+      const geometry = mesh.geometry as THREE.BufferGeometry;
+      const positionAttribute = geometry.getAttribute("position");
+      const positions = Array.from(positionAttribute.array) as number[];
+
+      let indices: number[];
+      if (geometry.index) {
+        indices = Array.from(geometry.index.array) as number[];
+      } else {
+        indices = positions.map((_, index) => index);
+      }
+
+      const colliderDesc = RAPIER.ColliderDesc.trimesh(positions, indices);
+      colliderDesc.setTranslation(
+        mesh.position.x,
+        mesh.position.y,
+        mesh.position.z
+      );
+      colliderDesc.setRotation({
+        x: mesh.quaternion.x,
+        y: mesh.quaternion.y,
+        z: mesh.quaternion.z,
+        w: mesh.quaternion.w,
+      });
+
+      return colliderDesc;
+    };
+
+    // 砂粒子を生成する関数
+    const generateSandParticles = (
+      scene: THREE.Scene,
+      rapierWorld: RAPIER.World
+    ) => {
+      const sandMaterial = new THREE.MeshStandardMaterial({
+        color: 0xffd700,
+      });
+
+      const sandMeshes: THREE.Mesh[] = [];
+      const sandRigidBodies: RAPIER.RigidBody[] = [];
+      const numSand = 200; // 必要に応じて調整
+
+      for (let i = 0; i < numSand; i++) {
+        const sphereGeometry = new THREE.SphereGeometry(0.05, 8, 8);
+        const sandMesh = new THREE.Mesh(sphereGeometry, sandMaterial);
+
+        // 内側の空間にランダムに配置
+        sandMesh.position.set(
+          (Math.random() - 0.5) * 1, // X座標
+          Math.random() * 3 + 1, // Y座標
+          (Math.random() - 0.5) * 1 // Z座標
+        );
+        scene.add(sandMesh);
+        sandMeshes.push(sandMesh);
+
+        // Rapier のリジッドボディ
+        const rigidBodyDesc = RAPIER.RigidBodyDesc.dynamic().setTranslation(
+          sandMesh.position.x,
+          sandMesh.position.y,
+          sandMesh.position.z
+        );
+        const rigidBody = rapierWorld.createRigidBody(rigidBodyDesc);
+
+        // コライダー
+        const colliderDesc = RAPIER.ColliderDesc.ball(0.05);
+        rapierWorld.createCollider(colliderDesc, rigidBody);
+
+        sandRigidBodies.push(rigidBody);
+      }
+
+      sandMeshesRef.current = sandMeshes;
+      sandRigidBodiesRef.current = sandRigidBodies;
     };
 
     init();
