@@ -15,6 +15,9 @@ const App: React.FC = () => {
   const animationFrameIdRef = useRef<number | null>(null);
   const sandMeshesRef = useRef<THREE.Mesh[]>([]);
   const sandRigidBodiesRef = useRef<RAPIER.RigidBody[]>([]);
+  const sandglassModelRef = useRef<THREE.Group | null>(null);
+  const sandglassRigidBodyRef = useRef<RAPIER.RigidBody | null>(null);
+  const isDraggingRef = useRef<boolean>(false);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -87,6 +90,15 @@ const App: React.FC = () => {
           (gltf) => {
             const sandglassModel = gltf.scene;
             scene.add(sandglassModel);
+            sandglassModelRef.current = sandglassModel;
+
+            // 砂時計のキネマティックリジッドボディを作成
+            const sandglassRigidBodyDesc =
+              RAPIER.RigidBodyDesc.kinematicPositionBased();
+            const sandglassRigidBody = rapierWorld.createRigidBody(
+              sandglassRigidBodyDesc
+            );
+            sandglassRigidBodyRef.current = sandglassRigidBody;
 
             // ガラスマテリアルの適用とコライダーの設定
             sandglassModel.traverse((child) => {
@@ -110,7 +122,7 @@ const App: React.FC = () => {
                 // 内側の面にコライダーを設定
                 if (mesh.name === "inner") {
                   const colliderDesc = createColliderFromMesh(mesh);
-                  rapierWorld.createCollider(colliderDesc);
+                  rapierWorld.createCollider(colliderDesc, sandglassRigidBody);
                 }
               }
             });
@@ -126,6 +138,11 @@ const App: React.FC = () => {
             );
           }
         );
+
+        renderer.domElement.addEventListener("mousedown", onMouseDown);
+        renderer.domElement.addEventListener("mouseup", onMouseUp);
+        renderer.domElement.addEventListener("mouseleave", onMouseUp);
+        renderer.domElement.addEventListener("mousemove", onMouseMove);
 
         // アニメーションループ
         const animate = () => {
@@ -305,6 +322,53 @@ const App: React.FC = () => {
       sandRigidBodiesRef.current = sandRigidBodies;
     };
 
+    // マウスイベントの設定
+    const onMouseDown = () => {
+      isDraggingRef.current = true;
+    };
+
+    const onMouseUp = () => {
+      isDraggingRef.current = false;
+    };
+
+    const onMouseMove = (event: MouseEvent) => {
+      if (
+        isDraggingRef.current &&
+        sandglassModelRef.current &&
+        sandglassRigidBodyRef.current
+      ) {
+        const deltaMove = {
+          x: event.movementX,
+          y: event.movementY,
+        };
+
+        const rotationSpeed = 0.005;
+        const sandglass = sandglassModelRef.current;
+        const sandglassRigidBody = sandglassRigidBodyRef.current;
+
+        // Three.jsのメッシュを回転
+        sandglass.rotation.y += deltaMove.x * rotationSpeed;
+        sandglass.rotation.x += deltaMove.y * rotationSpeed;
+
+        // メッシュの回転を取得してクォータニオンに変換
+        const euler = new THREE.Euler(
+          sandglass.rotation.x,
+          sandglass.rotation.y,
+          sandglass.rotation.z
+        );
+        const quaternion = new THREE.Quaternion();
+        quaternion.setFromEuler(euler);
+
+        // リジッドボディの回転を更新
+        sandglassRigidBody.setNextKinematicRotation({
+          x: quaternion.x,
+          y: quaternion.y,
+          z: quaternion.z,
+          w: quaternion.w,
+        });
+      }
+    };
+
     init();
 
     // ウィンドウリサイズの処理
@@ -331,6 +395,10 @@ const App: React.FC = () => {
 
       if (rendererRef.current) {
         const renderer = rendererRef.current;
+        renderer.domElement.removeEventListener("mousedown", onMouseDown);
+        renderer.domElement.removeEventListener("mouseup", onMouseUp);
+        renderer.domElement.removeEventListener("mouseleave", onMouseUp);
+        renderer.domElement.removeEventListener("mousemove", onMouseMove);
         if (renderer.domElement && renderer.domElement.parentNode === mount) {
           mount.removeChild(renderer.domElement);
         }
@@ -342,6 +410,11 @@ const App: React.FC = () => {
       sceneRef.current = null;
       cameraRef.current = null;
       rapierWorldRef.current = null;
+      sandMeshesRef.current = [];
+      sandRigidBodiesRef.current = [];
+      sandglassModelRef.current = null;
+      sandglassRigidBodyRef.current = null;
+      isDraggingRef.current = false;
     };
   }, []);
 
