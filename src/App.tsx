@@ -110,7 +110,7 @@ const App: React.FC = () => {
 
                 // 内側の面にコライダーを設定
                 if (mesh.name === "inner") {
-                  const colliderDesc = createTrimeshCollider(mesh);
+                  const colliderDesc = createColliderFromMesh(mesh);
                   rapierWorld.createCollider(colliderDesc);
                 }
               }
@@ -213,21 +213,32 @@ const App: React.FC = () => {
       });
     };
 
-    // Trimeshコライダーを作成する関数
-    const createTrimeshCollider = (mesh: THREE.Mesh): RAPIER.ColliderDesc => {
+    // メッシュからコライダーを作成する関数
+    const createColliderFromMesh = (mesh: THREE.Mesh): RAPIER.ColliderDesc => {
       const geometry = mesh.geometry as THREE.BufferGeometry;
       const positionAttribute = geometry.getAttribute(
         "position"
       ) as THREE.BufferAttribute;
 
       // Positions as Float32Array
-      const positions = positionAttribute.array as Float32Array;
+      const positions = new Float32Array(
+        positionAttribute.count * positionAttribute.itemSize
+      );
+      for (let i = 0; i < positionAttribute.count; i++) {
+        positions[i * 3] = positionAttribute.getX(i) * mesh.scale.x;
+        positions[i * 3 + 1] = positionAttribute.getY(i) * mesh.scale.y;
+        positions[i * 3 + 2] = positionAttribute.getZ(i) * mesh.scale.z;
+      }
 
       let indices: Uint32Array;
       if (geometry.index) {
-        indices = new Uint32Array(geometry.index.array);
+        const indexArray = geometry.index.array;
+        indices = new Uint32Array(geometry.index.count);
+        for (let i = 0; i < geometry.index.count; i++) {
+          indices[i] = indexArray[i];
+        }
       } else {
-        const indicesCount = positions.length / 3;
+        const indicesCount = positionAttribute.count;
         indices = new Uint32Array(indicesCount);
         for (let i = 0; i < indicesCount; i++) {
           indices[i] = i;
@@ -256,22 +267,22 @@ const App: React.FC = () => {
       rapierWorld: RAPIER.World
     ) => {
       const sandMaterial = new THREE.MeshStandardMaterial({
-        color: 0xffd700,
+        color: 0xbfa539,
       });
 
       const sandMeshes: THREE.Mesh[] = [];
       const sandRigidBodies: RAPIER.RigidBody[] = [];
-      const numSand = 200; // 必要に応じて調整
+      const numSand = 2000; // 必要に応じて調整
 
       for (let i = 0; i < numSand; i++) {
-        const sphereGeometry = new THREE.SphereGeometry(0.05, 8, 8);
+        const sphereGeometry = new THREE.SphereGeometry(0.005, 8, 8);
         const sandMesh = new THREE.Mesh(sphereGeometry, sandMaterial);
 
         // 内側の空間にランダムに配置
         sandMesh.position.set(
-          (Math.random() - 0.5) * 1, // X座標
-          Math.random() * 3 + 1, // Y座標
-          (Math.random() - 0.5) * 1 // Z座標
+          (Math.random() - 0.5) * 0.1, // X座標
+          Math.random() * 0.05 - 0.95, // Y座標
+          (Math.random() - 0.5) * 0.1 // Z座標
         );
         scene.add(sandMesh);
         sandMeshes.push(sandMesh);
@@ -285,7 +296,7 @@ const App: React.FC = () => {
         const rigidBody = rapierWorld.createRigidBody(rigidBodyDesc);
 
         // コライダー
-        const colliderDesc = RAPIER.ColliderDesc.ball(0.05);
+        const colliderDesc = RAPIER.ColliderDesc.ball(0.005);
         rapierWorld.createCollider(colliderDesc, rigidBody);
 
         sandRigidBodies.push(rigidBody);
