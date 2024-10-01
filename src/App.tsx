@@ -44,23 +44,33 @@ const App: React.FC = () => {
           0.1,
           1000
         );
-        camera.position.z = 10;
+        camera.position.z = 2.5;
         cameraRef.current = camera;
 
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(mount.clientWidth, mount.clientHeight);
         renderer.setPixelRatio(window.devicePixelRatio);
-        renderer.setClearColor(0x20252f, 1); // 背景色を設定
+        renderer.setClearColor(0x000000, 1); // 背景色を黒に設定
+
         mount.appendChild(renderer.domElement);
         rendererRef.current = renderer;
 
         // 照明の追加
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        const ambientLight = new THREE.AmbientLight(0xffffff, 1.0); // 強度を1.0に変更
         scene.add(ambientLight);
 
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 2.0); // 強度を2.0に変更
         directionalLight.position.set(10, 10, 10);
         scene.add(directionalLight);
+
+        // HemisphereLightの追加
+        const hemisphereLight = new THREE.HemisphereLight(
+          0xffffff,
+          0x444444,
+          0.6
+        );
+        hemisphereLight.position.set(0, 20, 0);
+        scene.add(hemisphereLight);
 
         // Rapier の物理ワールドを作成
         const rapierWorld = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
@@ -88,13 +98,13 @@ const App: React.FC = () => {
                 mesh.material = new THREE.MeshPhysicalMaterial({
                   color: 0xffffff,
                   metalness: 0,
-                  roughness: 0,
+                  roughness: 0.0, // 反射を強くするために0.0に設定
                   opacity: 1,
                   transparent: true,
                   transmission: 1, // ガラスのように透明にする
                   thickness: 0.1, // ガラスの厚み
                   envMap: environmentMap,
-                  envMapIntensity: 1,
+                  envMapIntensity: 2.0, // 環境マップの影響を強める
                   ior: 1.5, // 屈折率
                 });
 
@@ -172,14 +182,21 @@ const App: React.FC = () => {
           "/tex/kloppenheim_06_puresky_4k.exr", // EXRファイルのパスを指定
           (texture) => {
             texture.mapping = THREE.EquirectangularReflectionMapping;
+            texture.colorSpace = THREE.SRGBColorSpace;
 
+            // PMREMGeneratorを使用して環境マップを生成
             const pmremGenerator = new PMREMGenerator(renderer);
             pmremGenerator.compileEquirectangularShader();
 
             const envMap = pmremGenerator.fromEquirectangular(texture).texture;
+
+            // 環境マップとして設定
             scene.environment = envMap;
 
-            texture.dispose();
+            // 背景には元の高解像度テクスチャを使用
+            scene.background = texture;
+
+            // 不要なリソースを解放
             pmremGenerator.dispose();
 
             resolve(envMap);
@@ -199,14 +216,22 @@ const App: React.FC = () => {
     // Trimeshコライダーを作成する関数
     const createTrimeshCollider = (mesh: THREE.Mesh): RAPIER.ColliderDesc => {
       const geometry = mesh.geometry as THREE.BufferGeometry;
-      const positionAttribute = geometry.getAttribute("position");
-      const positions = Array.from(positionAttribute.array) as number[];
+      const positionAttribute = geometry.getAttribute(
+        "position"
+      ) as THREE.BufferAttribute;
 
-      let indices: number[];
+      // Positions as Float32Array
+      const positions = positionAttribute.array as Float32Array;
+
+      let indices: Uint32Array;
       if (geometry.index) {
-        indices = Array.from(geometry.index.array) as number[];
+        indices = new Uint32Array(geometry.index.array);
       } else {
-        indices = positions.map((_, index) => index);
+        const indicesCount = positions.length / 3;
+        indices = new Uint32Array(indicesCount);
+        for (let i = 0; i < indicesCount; i++) {
+          indices[i] = i;
+        }
       }
 
       const colliderDesc = RAPIER.ColliderDesc.trimesh(positions, indices);
