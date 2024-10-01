@@ -3,7 +3,6 @@ import * as THREE from "three";
 import * as RAPIER from "@dimforge/rapier3d-compat";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { EXRLoader } from "three/examples/jsm/loaders/EXRLoader.js";
-import { PMREMGenerator } from "three";
 
 const App: React.FC = () => {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -185,7 +184,7 @@ const App: React.FC = () => {
             texture.colorSpace = THREE.SRGBColorSpace;
 
             // PMREMGeneratorを使用して環境マップを生成
-            const pmremGenerator = new PMREMGenerator(renderer);
+            const pmremGenerator = new THREE.PMREMGenerator(renderer);
             pmremGenerator.compileEquirectangularShader();
 
             const envMap = pmremGenerator.fromEquirectangular(texture).texture;
