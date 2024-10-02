@@ -1,23 +1,20 @@
+// App.tsx
 import React, { useEffect, useRef } from "react";
 import * as THREE from "three";
-import * as RAPIER from "@dimforge/rapier3d-compat";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { EXRLoader } from "three/examples/jsm/loaders/EXRLoader.js";
+import { GPUComputationRenderer } from "three/examples/jsm/misc/GPUComputationRenderer.js";
 
 const App: React.FC = () => {
   const mountRef = useRef<HTMLDivElement | null>(null);
 
-  // レンダラー、シーン、カメラ、物理ワールドを保持するRefを作成
+  // レンダラー、シーン、カメラを保持するRefを作成
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const rapierWorldRef = useRef<RAPIER.World | null>(null);
   const animationFrameIdRef = useRef<number | null>(null);
-  const sandMeshesRef = useRef<THREE.Mesh[]>([]);
-  const sandRigidBodiesRef = useRef<RAPIER.RigidBody[]>([]);
-  const sandglassModelRef = useRef<THREE.Group | null>(null);
-  const sandglassRigidBodyRef = useRef<RAPIER.RigidBody | null>(null);
   const isDraggingRef = useRef<boolean>(false);
+  const gpuComputeRef = useRef<GPUComputationRenderer | null>(null);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -31,11 +28,6 @@ const App: React.FC = () => {
 
     const init = async () => {
       try {
-        // Rapier.js の初期化
-        await RAPIER.init();
-
-        if (canceled) return; // クリーンアップされた場合は何もしない
-
         // シーン、カメラ、レンダラーの設定
         const scene = new THREE.Scene();
         sceneRef.current = scene;
@@ -58,25 +50,12 @@ const App: React.FC = () => {
         rendererRef.current = renderer;
 
         // 照明の追加
-        const ambientLight = new THREE.AmbientLight(0xffffff, 1.0); // 強度を1.0に変更
+        const ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
         scene.add(ambientLight);
 
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 2.0); // 強度を2.0に変更
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 2.0);
         directionalLight.position.set(10, 10, 10);
         scene.add(directionalLight);
-
-        // HemisphereLightの追加
-        const hemisphereLight = new THREE.HemisphereLight(
-          0xffffff,
-          0x444444,
-          0.6
-        );
-        hemisphereLight.position.set(0, 20, 0);
-        scene.add(hemisphereLight);
-
-        // Rapier の物理ワールドを作成
-        const rapierWorld = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
-        rapierWorldRef.current = rapierWorld;
 
         // 環境マップの読み込み
         const environmentMap = await loadEnvironment(renderer, scene);
@@ -85,22 +64,15 @@ const App: React.FC = () => {
         const gltfLoader = new GLTFLoader();
         const glbPath = "/model/sandglass.glb"; // GLBファイルのパスを指定
 
+        let innerMesh: THREE.Mesh | null = null;
+
         gltfLoader.load(
           glbPath,
           (gltf) => {
             const sandglassModel = gltf.scene;
             scene.add(sandglassModel);
-            sandglassModelRef.current = sandglassModel;
 
-            // 砂時計のキネマティックリジッドボディを作成
-            const sandglassRigidBodyDesc =
-              RAPIER.RigidBodyDesc.kinematicPositionBased();
-            const sandglassRigidBody = rapierWorld.createRigidBody(
-              sandglassRigidBodyDesc
-            );
-            sandglassRigidBodyRef.current = sandglassRigidBody;
-
-            // ガラスマテリアルの適用とコライダーの設定
+            // ガラスマテリアルの適用と "inner" メッシュの取得
             sandglassModel.traverse((child) => {
               if ((child as THREE.Mesh).isMesh) {
                 const mesh = child as THREE.Mesh;
@@ -109,26 +81,29 @@ const App: React.FC = () => {
                 mesh.material = new THREE.MeshPhysicalMaterial({
                   color: 0xffffff,
                   metalness: 0,
-                  roughness: 0.0, // 反射を強くするために0.0に設定
+                  roughness: 0.0,
                   opacity: 1,
                   transparent: true,
-                  transmission: 1, // ガラスのように透明にする
-                  thickness: 0.1, // ガラスの厚み
+                  transmission: 1,
+                  thickness: 0.1,
                   envMap: environmentMap,
-                  envMapIntensity: 2.0, // 環境マップの影響を強める
-                  ior: 1.5, // 屈折率
+                  envMapIntensity: 2.0,
+                  ior: 1.5,
                 });
 
-                // 内側の面にコライダーを設定
                 if (mesh.name === "inner") {
-                  const colliderDesc = createColliderFromMesh(mesh);
-                  rapierWorld.createCollider(colliderDesc, sandglassRigidBody);
+                  innerMesh = mesh;
                 }
               }
             });
 
+            if (!innerMesh) {
+              console.error("メッシュ 'inner' が見つかりませんでした。");
+              return;
+            }
+
             // 砂粒子を生成
-            generateSandParticles(scene, rapierWorld);
+            generateSandParticles(scene, renderer);
           },
           undefined,
           (error) => {
@@ -148,33 +123,11 @@ const App: React.FC = () => {
         const animate = () => {
           if (canceled) return;
 
-          if (
-            !rendererRef.current ||
-            !sceneRef.current ||
-            !cameraRef.current ||
-            !rapierWorldRef.current
-          )
+          if (!rendererRef.current || !sceneRef.current || !cameraRef.current)
             return;
 
-          rapierWorldRef.current.step();
-
-          // 砂粒子の位置と回転を更新
-          for (let i = 0; i < sandMeshesRef.current.length; i++) {
-            const rigidBody = sandRigidBodiesRef.current[i];
-            const position = rigidBody.translation();
-            const rotation = rigidBody.rotation();
-
-            sandMeshesRef.current[i].position.set(
-              position.x,
-              position.y,
-              position.z
-            );
-            sandMeshesRef.current[i].quaternion.set(
-              rotation.x,
-              rotation.y,
-              rotation.z,
-              rotation.w
-            );
+          if (gpuComputeRef.current) {
+            gpuComputeRef.current.compute();
           }
 
           rendererRef.current.render(sceneRef.current, cameraRef.current);
@@ -229,100 +182,272 @@ const App: React.FC = () => {
       });
     };
 
-    // メッシュからコライダーを作成する関数
-    const createColliderFromMesh = (mesh: THREE.Mesh): RAPIER.ColliderDesc => {
-      const geometry = mesh.geometry as THREE.BufferGeometry;
-      const positionAttribute = geometry.getAttribute(
-        "position"
-      ) as THREE.BufferAttribute;
+    // 砂粒子を生成する関数
+    const generateSandParticles = async (
+      scene: THREE.Scene,
+      renderer: THREE.WebGLRenderer
+    ) => {
+      const numParticles = 256 * 256; // 粒子数
+      const gpuCompute = new GPUComputationRenderer(256, 256, renderer);
+      gpuComputeRef.current = gpuCompute;
 
-      // Positions as Float32Array
-      const positions = new Float32Array(
-        positionAttribute.count * positionAttribute.itemSize
+      // **SDFテクスチャを事前に生成されたファイルから読み込む**
+      // SDFテクスチャを読み込む
+      const sdfResult = await loadSDFTexture("/sdf/sandglass_sdf.json");
+      const sdfTexture = sdfResult.texture;
+      const sdfSize = sdfResult.size;
+      const sdfMin = sdfResult.min;
+      const sdfMax = sdfResult.max;
+
+      // テクスチャの初期化
+      const dtPosition = gpuCompute.createTexture();
+      const dtVelocity = gpuCompute.createTexture();
+
+      // 初期位置と速度を設定
+      fillPositionTexture(dtPosition);
+      fillVelocityTexture(dtVelocity);
+
+      // シェーダーの読み込み
+      const positionVariable = gpuCompute.addVariable(
+        "texturePosition",
+        positionShader(),
+        dtPosition
       );
-      for (let i = 0; i < positionAttribute.count; i++) {
-        positions[i * 3] = positionAttribute.getX(i) * mesh.scale.x;
-        positions[i * 3 + 1] = positionAttribute.getY(i) * mesh.scale.y;
-        positions[i * 3 + 2] = positionAttribute.getZ(i) * mesh.scale.z;
+      const velocityVariable = gpuCompute.addVariable(
+        "textureVelocity",
+        velocityShader(),
+        dtVelocity
+      );
+
+      // デペンデンシーの設定
+      gpuCompute.setVariableDependencies(positionVariable, [
+        positionVariable,
+        velocityVariable,
+      ]);
+      gpuCompute.setVariableDependencies(velocityVariable, [
+        positionVariable,
+        velocityVariable,
+      ]);
+
+      // パラメータの設定
+      velocityVariable.material.uniforms["gravity"] = {
+        value: new THREE.Vector3(0, -9.81, 0),
+      };
+      velocityVariable.material.uniforms["time"] = { value: 0.0 };
+      velocityVariable.material.uniforms["delta"] = { value: 0.0 };
+      velocityVariable.material.uniforms["sdfTexture"] = { value: sdfTexture };
+      velocityVariable.material.uniforms["sdfSize"] = { value: sdfSize };
+      velocityVariable.material.uniforms["sdfMin"] = { value: sdfMin };
+      velocityVariable.material.uniforms["sdfMax"] = { value: sdfMax };
+
+      positionVariable.material.uniforms["delta"] = { value: 0.0 };
+
+      // エラーのチェック
+      const error = gpuCompute.init();
+      if (error !== null) {
+        console.error(error);
       }
 
-      let indices: Uint32Array;
-      if (geometry.index) {
-        const indexArray = geometry.index.array;
-        indices = new Uint32Array(geometry.index.count);
-        for (let i = 0; i < geometry.index.count; i++) {
-          indices[i] = indexArray[i];
-        }
-      } else {
-        const indicesCount = positionAttribute.count;
-        indices = new Uint32Array(indicesCount);
-        for (let i = 0; i < indicesCount; i++) {
-          indices[i] = i;
-        }
+      // パーティクルの描画用メッシュを作成
+      const geometry = new THREE.BufferGeometry();
+      const positions = new Float32Array(numParticles * 3);
+
+      // UV を手動で初期化
+      const uvs = new Float32Array(numParticles * 2);
+
+      for (let i = 0; i < numParticles; i++) {
+        const x = (i % 256) / 256;
+        const y = Math.floor(i / 256) / 256;
+        uvs[i * 2] = x;
+        uvs[i * 2 + 1] = y;
       }
 
-      const colliderDesc = RAPIER.ColliderDesc.trimesh(positions, indices);
-      colliderDesc.setTranslation(
-        mesh.position.x,
-        mesh.position.y,
-        mesh.position.z
+      geometry.setAttribute(
+        "position",
+        new THREE.BufferAttribute(positions, 3)
       );
-      colliderDesc.setRotation({
-        x: mesh.quaternion.x,
-        y: mesh.quaternion.y,
-        z: mesh.quaternion.z,
-        w: mesh.quaternion.w,
+      geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+
+      const material = new THREE.ShaderMaterial({
+        uniforms: {
+          texturePosition: { value: null },
+        },
+        vertexShader: particleVertexShader(),
+        fragmentShader: particleFragmentShader(),
+        transparent: true,
       });
 
-      return colliderDesc;
+      const particles = new THREE.Points(geometry, material);
+      scene.add(particles);
+
+      // アニメーションループ内でテクスチャを更新
+      const clock = new THREE.Clock();
+
+      const animateParticles = () => {
+        if (
+          gpuComputeRef.current &&
+          velocityVariable.material.uniforms["time"]
+        ) {
+          const delta = clock.getDelta();
+          velocityVariable.material.uniforms["delta"].value = delta;
+          velocityVariable.material.uniforms["time"].value += delta;
+
+          positionVariable.material.uniforms["delta"].value = delta;
+
+          gpuCompute.compute();
+
+          material.uniforms["texturePosition"].value =
+            gpuCompute.getCurrentRenderTarget(positionVariable).texture;
+        }
+
+        requestAnimationFrame(animateParticles);
+      };
+
+      animateParticles();
     };
 
-    // 砂粒子を生成する関数
-    const generateSandParticles = (
-      scene: THREE.Scene,
-      rapierWorld: RAPIER.World
-    ) => {
-      const sandMaterial = new THREE.MeshStandardMaterial({
-        color: 0xbfa539,
-      });
+    // SDFテクスチャを読み込む関数を追加
+    const loadSDFTexture = async (
+      path: string
+    ): Promise<{
+      texture: THREE.Data3DTexture;
+      size: number;
+      min: THREE.Vector3;
+      max: THREE.Vector3;
+    }> => {
+      const response = await fetch(path);
+      const sdfJson = await response.json();
 
-      const sandMeshes: THREE.Mesh[] = [];
-      const sandRigidBodies: RAPIER.RigidBody[] = [];
-      const numSand = 2000; // 必要に応じて調整
+      const size = sdfJson.size;
+      const dataArray = new Float32Array(sdfJson.data);
+      const min = new THREE.Vector3().fromArray(sdfJson.min);
+      const max = new THREE.Vector3().fromArray(sdfJson.max);
 
-      for (let i = 0; i < numSand; i++) {
-        const sphereGeometry = new THREE.SphereGeometry(0.005, 8, 8);
-        const sandMesh = new THREE.Mesh(sphereGeometry, sandMaterial);
+      const texture = new THREE.Data3DTexture(dataArray, size, size, size);
+      texture.format = THREE.RedFormat;
+      texture.type = THREE.FloatType;
+      texture.minFilter = THREE.LinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.unpackAlignment = 1;
+      texture.needsUpdate = true;
 
-        // 内側の空間にランダムに配置
-        sandMesh.position.set(
-          (Math.random() - 0.5) * 0.1, // X座標
-          Math.random() * 0.05 - 0.95, // Y座標
-          (Math.random() - 0.5) * 0.1 // Z座標
-        );
-        scene.add(sandMesh);
-        sandMeshes.push(sandMesh);
+      return { texture, size, min, max };
+    };
 
-        // Rapier のリジッドボディ
-        const rigidBodyDesc = RAPIER.RigidBodyDesc.dynamic().setTranslation(
-          sandMesh.position.x,
-          sandMesh.position.y,
-          sandMesh.position.z
-        );
-        const rigidBody = rapierWorld.createRigidBody(rigidBodyDesc);
+    // 位置テクスチャの初期化
+    const fillPositionTexture = (texture: THREE.DataTexture) => {
+      const data = texture.image.data;
 
-        // コライダー
-        const colliderDesc = RAPIER.ColliderDesc.ball(0.005)
-          .setDensity(1600) // 密度を設定
-          .setRestitution(0.1) // 反発係数
-          .setFriction(0.6); // 摩擦係数
-        rapierWorld.createCollider(colliderDesc, rigidBody);
-
-        sandRigidBodies.push(rigidBody);
+      for (let i = 0; i < data.length; i += 4) {
+        data[i] = (Math.random() - 0.5) * 0.1; // x
+        data[i + 1] = Math.random() * 0.05 - 0.95; // y
+        data[i + 2] = (Math.random() - 0.5) * 0.1; // z
+        data[i + 3] = 1.0; // w
       }
+    };
 
-      sandMeshesRef.current = sandMeshes;
-      sandRigidBodiesRef.current = sandRigidBodies;
+    // 速度テクスチャの初期化
+    const fillVelocityTexture = (texture: THREE.DataTexture) => {
+      const data = texture.image.data;
+
+      for (let i = 0; i < data.length; i += 4) {
+        data[i] = 0.0; // vx
+        data[i + 1] = 0.0; // vy
+        data[i + 2] = 0.0; // vz
+        data[i + 3] = 0.0; // w
+      }
+    };
+
+    // 位置更新用のシェーダー
+    const positionShader = () => {
+      return `
+        uniform float delta;
+
+        void main() {
+          vec2 uv = gl_FragCoord.xy / resolution.xy;
+          vec4 pos = texture2D(texturePosition, uv);
+          vec4 vel = texture2D(textureVelocity, uv);
+
+          pos.xyz += vel.xyz * delta;
+
+          gl_FragColor = pos;
+        }
+      `;
+    };
+
+    // 速度更新用のシェーダー
+    const velocityShader = () => {
+      return `
+        uniform float time;
+        uniform float delta;
+        uniform vec3 gravity;
+        uniform sampler3D sdfTexture;
+        uniform int sdfSize;
+        uniform vec3 sdfMin;
+        uniform vec3 sdfMax;
+
+        // SDFの勾配から法線を計算
+        vec3 computeNormal(vec3 sdfUV) {
+          float eps = 1.0 / float(sdfSize);
+          float sdfX1 = texture(sdfTexture, sdfUV + vec3(eps, 0.0, 0.0)).r;
+          float sdfX2 = texture(sdfTexture, sdfUV - vec3(eps, 0.0, 0.0)).r;
+          float sdfY1 = texture(sdfTexture, sdfUV + vec3(0.0, eps, 0.0)).r;
+          float sdfY2 = texture(sdfTexture, sdfUV - vec3(0.0, eps, 0.0)).r;
+          float sdfZ1 = texture(sdfTexture, sdfUV + vec3(0.0, 0.0, eps)).r;
+          float sdfZ2 = texture(sdfTexture, sdfUV - vec3(0.0, 0.0, eps)).r;
+
+          vec3 normal = normalize(vec3(
+            sdfX1 - sdfX2,
+            sdfY1 - sdfY2,
+            sdfZ1 - sdfZ2
+          ));
+
+          return normal;
+        }
+
+        void main() {
+          vec2 uv = gl_FragCoord.xy / resolution.xy;
+          vec4 pos = texture2D(texturePosition, uv);
+          vec4 vel = texture2D(textureVelocity, uv);
+
+          // 重力の適用
+          vel.xyz += gravity * delta;
+
+          // 衝突判定
+          vec3 sdfUV = (pos.xyz - sdfMin) / (sdfMax - sdfMin);
+          float sdfValue = texture(sdfTexture, sdfUV).r;
+
+          if (sdfValue < 0.0) {
+            // 壁に衝突している場合、法線方向に反射
+            vec3 normal = computeNormal(sdfUV);
+            vel.xyz = reflect(vel.xyz, normal) * 0.5; // 速度を減衰
+          }
+
+          gl_FragColor = vel;
+        }
+      `;
+    };
+
+    // パーティクルの頂点シェーダー
+    const particleVertexShader = () => {
+      return `
+        uniform sampler2D texturePosition;
+
+        void main() {
+          vec4 pos = texture2D(texturePosition, uv);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(pos.xyz, 1.0);
+          gl_PointSize = 1.0;
+        }
+      `;
+    };
+
+    // パーティクルのフラグメントシェーダー
+    const particleFragmentShader = () => {
+      return `
+        void main() {
+          gl_FragColor = vec4(1.0, 0.9, 0.5, 1.0); // 砂の色
+        }
+      `;
     };
 
     // マウスイベントの設定
@@ -335,40 +460,17 @@ const App: React.FC = () => {
     };
 
     const onMouseMove = (event: MouseEvent) => {
-      if (
-        isDraggingRef.current &&
-        sandglassModelRef.current &&
-        sandglassRigidBodyRef.current
-      ) {
+      if (isDraggingRef.current && sceneRef.current) {
         const deltaMove = {
           x: event.movementX,
           y: event.movementY,
         };
 
         const rotationSpeed = 0.005;
-        const sandglass = sandglassModelRef.current;
-        const sandglassRigidBody = sandglassRigidBodyRef.current;
 
-        // Three.jsのメッシュを回転
-        sandglass.rotation.y += deltaMove.x * rotationSpeed;
-        sandglass.rotation.x += deltaMove.y * rotationSpeed;
-
-        // メッシュの回転を取得してクォータニオンに変換
-        const euler = new THREE.Euler(
-          sandglass.rotation.x,
-          sandglass.rotation.y,
-          sandglass.rotation.z
-        );
-        const quaternion = new THREE.Quaternion();
-        quaternion.setFromEuler(euler);
-
-        // リジッドボディの回転を更新
-        sandglassRigidBody.setNextKinematicRotation({
-          x: quaternion.x,
-          y: quaternion.y,
-          z: quaternion.z,
-          w: quaternion.w,
-        });
+        // シーン全体を回転
+        sceneRef.current.rotation.y += deltaMove.x * rotationSpeed;
+        sceneRef.current.rotation.x += deltaMove.y * rotationSpeed;
       }
     };
 
@@ -412,12 +514,8 @@ const App: React.FC = () => {
       // 他のリソースのクリーンアップも必要に応じて行う
       sceneRef.current = null;
       cameraRef.current = null;
-      rapierWorldRef.current = null;
-      sandMeshesRef.current = [];
-      sandRigidBodiesRef.current = [];
-      sandglassModelRef.current = null;
-      sandglassRigidBodyRef.current = null;
       isDraggingRef.current = false;
+      gpuComputeRef.current = null;
     };
   }, []);
 
