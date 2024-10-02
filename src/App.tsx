@@ -312,7 +312,10 @@ const App: React.FC = () => {
         const rigidBody = rapierWorld.createRigidBody(rigidBodyDesc);
 
         // コライダー
-        const colliderDesc = RAPIER.ColliderDesc.ball(0.005);
+        const colliderDesc = RAPIER.ColliderDesc.ball(0.005)
+          .setDensity(1600) // 密度を設定
+          .setRestitution(0.1) // 反発係数
+          .setFriction(0.6); // 摩擦係数
         rapierWorld.createCollider(colliderDesc, rigidBody);
 
         sandRigidBodies.push(rigidBody);
