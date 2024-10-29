@@ -106,6 +106,8 @@ const App: React.FC = () => {
                   envMap: environmentMap,
                   envMapIntensity: 2.0,
                   ior: 1.5,
+                  depthWrite: false,
+                  side: THREE.DoubleSide,
                 });
 
                 if (mesh.name === "inner") {
@@ -254,7 +256,7 @@ const App: React.FC = () => {
 
       // **SDFテクスチャを事前に生成されたファイルから読み込む**
       // SDFテクスチャを読み込む
-      const sdfResult = await loadSDFTexture("/sdf/sdf_output.json");
+      const sdfResult = await loadSDFTexture("/sdf/sandglass_sdf.json");
       const sdfTexture = sdfResult.texture;
       const sdfSize = sdfResult.size;
       const sdfMin = sdfResult.min;
@@ -309,6 +311,10 @@ const App: React.FC = () => {
       velocityVariable.material.uniforms["sdfMax"] = { value: sdfMax };
 
       positionVariable.material.uniforms["delta"] = { value: 0.0 };
+      positionVariable.material.uniforms["sdfTexture"] = { value: sdfTexture };
+      positionVariable.material.uniforms["sdfSize"] = { value: sdfSize };
+      positionVariable.material.uniforms["sdfMin"] = { value: sdfMin };
+      positionVariable.material.uniforms["sdfMax"] = { value: sdfMax };
 
       // エラーのチェック
       const error = gpuCompute.init();
@@ -435,14 +441,41 @@ const App: React.FC = () => {
     const positionShader = () => {
       return `
         uniform float delta;
-
+        uniform sampler3D sdfTexture;
+        uniform int sdfSize;
+        uniform vec3 sdfMin;
+        uniform vec3 sdfMax;
+    
+        vec3 computeNormal(vec3 sdfUV) {
+          float eps = 1.0 / float(sdfSize);
+    
+          // Compute gradient of the SDF to find the normal
+          vec3 grad;
+          grad.x = texture(sdfTexture, sdfUV + vec3(eps, 0.0, 0.0)).r - texture(sdfTexture, sdfUV - vec3(eps, 0.0, 0.0)).r;
+          grad.y = texture(sdfTexture, sdfUV + vec3(0.0, eps, 0.0)).r - texture(sdfTexture, sdfUV - vec3(0.0, eps, 0.0)).r;
+          grad.z = texture(sdfTexture, sdfUV + vec3(0.0, 0.0, eps)).r - texture(sdfTexture, sdfUV - vec3(0.0, 0.0, eps)).r;
+    
+          return normalize(grad);
+        }
+    
         void main() {
           vec2 uv = gl_FragCoord.xy / resolution.xy;
           vec4 pos = texture2D(texturePosition, uv);
           vec4 vel = texture2D(textureVelocity, uv);
-
+    
           pos.xyz += vel.xyz * delta;
-
+    
+          // Normalize position within SDF bounds
+          vec3 sdfUV = (pos.xyz - sdfMin) / (sdfMax - sdfMin);
+          sdfUV = clamp(sdfUV, vec3(0.0), vec3(1.0));
+          float sdfValue = texture(sdfTexture, sdfUV).r;
+    
+          if (sdfValue > 0.0) {
+            // Move the particle back inside the SDF
+            vec3 normal = computeNormal(sdfUV);
+            pos.xyz -= sdfValue * normal;
+          }
+    
           gl_FragColor = pos;
         }
       `;
@@ -458,55 +491,39 @@ const App: React.FC = () => {
         uniform int sdfSize;
         uniform vec3 sdfMin;
         uniform vec3 sdfMax;
-
-        // SDFの勾配から法線を計算
+    
         vec3 computeNormal(vec3 sdfUV) {
           float eps = 1.0 / float(sdfSize);
-          
-          // サンプリング位置をclamp
-          vec3 sdfUVPlusX = clamp(sdfUV + vec3(eps, 0.0, 0.0), vec3(0.0), vec3(1.0));
-          vec3 sdfUVMinusX = clamp(sdfUV - vec3(eps, 0.0, 0.0), vec3(0.0), vec3(1.0));
-          float sdfX1 = texture(sdfTexture, sdfUVPlusX).r;
-          float sdfX2 = texture(sdfTexture, sdfUVMinusX).r;
-          
-          vec3 sdfUVPlusY = clamp(sdfUV + vec3(0.0, eps, 0.0), vec3(0.0), vec3(1.0));
-          vec3 sdfUVMinusY = clamp(sdfUV - vec3(0.0, eps, 0.0), vec3(0.0), vec3(1.0));
-          float sdfY1 = texture(sdfTexture, sdfUVPlusY).r;
-          float sdfY2 = texture(sdfTexture, sdfUVMinusY).r;
-          
-          vec3 sdfUVPlusZ = clamp(sdfUV + vec3(0.0, 0.0, eps), vec3(0.0), vec3(1.0));
-          vec3 sdfUVMinusZ = clamp(sdfUV - vec3(0.0, 0.0, eps), vec3(0.0), vec3(1.0));
-          float sdfZ1 = texture(sdfTexture, sdfUVPlusZ).r;
-          float sdfZ2 = texture(sdfTexture, sdfUVMinusZ).r;
-          
-          vec3 normal = normalize(vec3(
-            sdfX1 - sdfX2,
-            sdfY1 - sdfY2,
-            sdfZ1 - sdfZ2
-          ));
-          
-          return normal;
+    
+          // Compute gradient of the SDF to find the normal
+          vec3 grad;
+          grad.x = texture(sdfTexture, sdfUV + vec3(eps, 0.0, 0.0)).r - texture(sdfTexture, sdfUV - vec3(eps, 0.0, 0.0)).r;
+          grad.y = texture(sdfTexture, sdfUV + vec3(0.0, eps, 0.0)).r - texture(sdfTexture, sdfUV - vec3(0.0, eps, 0.0)).r;
+          grad.z = texture(sdfTexture, sdfUV + vec3(0.0, 0.0, eps)).r - texture(sdfTexture, sdfUV - vec3(0.0, 0.0, eps)).r;
+    
+          return normalize(grad);
         }
-
+    
         void main() {
           vec2 uv = gl_FragCoord.xy / resolution.xy;
           vec4 pos = texture2D(texturePosition, uv);
           vec4 vel = texture2D(textureVelocity, uv);
-
-          // 重力の適用
+    
+          // Apply gravity
           vel.xyz += gravity * delta;
-
-          // SDF範囲内に正規化
+    
+          // Normalize position within SDF bounds
           vec3 sdfUV = (pos.xyz - sdfMin) / (sdfMax - sdfMin);
           sdfUV = clamp(sdfUV, vec3(0.0), vec3(1.0));
           float sdfValue = texture(sdfTexture, sdfUV).r;
-
-          if (sdfValue > 0.0) { // 外側に出た場合
-            // 壁に衝突している場合、法線方向に反射
+    
+          if (sdfValue > 0.0) { // If outside the SDF
+            // Compute the normal from the SDF gradient
             vec3 normal = computeNormal(sdfUV);
-            vel.xyz = reflect(vel.xyz, normal) * 0.5; // 速度を減衰
+            // Reflect the velocity vector
+            vel.xyz = reflect(vel.xyz, normal) * 0.5; // Apply damping factor
           }
-
+    
           gl_FragColor = vel;
         }
       `;

@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "gen:sdf": "tsx ./scripts/generate_sdf.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.14.0",
@@ -31,6 +32,7 @@
     "glslify": "^7.1.1",
     "jsdom": "^25.0.1",
     "ts-node": "^10.9.2",
+    "tsx": "^4.19.2",
     "typescript": "^5.5.3",
     "typescript-eslint": "^8.0.1",
     "vite": "^5.4.1",
