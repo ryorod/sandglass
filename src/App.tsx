@@ -254,7 +254,7 @@ const App: React.FC = () => {
 
       // **SDFテクスチャを事前に生成されたファイルから読み込む**
       // SDFテクスチャを読み込む
-      const sdfResult = await loadSDFTexture("/sdf/sandglass_sdf.json");
+      const sdfResult = await loadSDFTexture("/sdf/sdf_output.json");
       const sdfTexture = sdfResult.texture;
       const sdfSize = sdfResult.size;
       const sdfMin = sdfResult.min;
@@ -396,10 +396,26 @@ const App: React.FC = () => {
       const data = texture.image.data;
 
       for (let i = 0; i < data.length; i += 4) {
-        data[i] = THREE.MathUtils.lerp(min.x, max.x, Math.random()); // x
-        data[i + 1] = THREE.MathUtils.lerp(min.y, max.y, Math.random()); // y
-        data[i + 2] = THREE.MathUtils.lerp(min.z, max.z, Math.random()); // z
-        data[i + 3] = 1.0; // w
+        // 粒子をSDFの内側に限定
+        const x = THREE.MathUtils.lerp(
+          min.x,
+          max.x,
+          0.5 + 0.25 * (Math.random() - 0.5)
+        );
+        const y = THREE.MathUtils.lerp(
+          min.y,
+          max.y,
+          0.5 + 0.25 * (Math.random() - 0.5)
+        );
+        const z = THREE.MathUtils.lerp(
+          min.z,
+          max.z,
+          0.5 + 0.25 * (Math.random() - 0.5)
+        );
+        data[i] = x;
+        data[i + 1] = y;
+        data[i + 2] = z;
+        data[i + 3] = 1.0;
       }
     };
 
@@ -532,7 +548,8 @@ const App: React.FC = () => {
           if (vSdfValue < 0.0) {
             gl_FragColor = vec4(1.0, 0.5, 0.0, 1.0); // 砂色
           } else {
-            discard; // 内側のみ表示
+            // discard; // 内側のみ表示
+           gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); // 黒色
           }
         }
       `;
