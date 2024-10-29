@@ -3,8 +3,9 @@ import * as fs from "fs";
 import * as path from "path";
 import * as THREE from "three";
 import { GLTF, GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { HitPointInfo, MeshBVH, acceleratedRaycast } from "three-mesh-bvh";
+import { MeshBVH, acceleratedRaycast } from "three-mesh-bvh";
 import { fileURLToPath } from "url";
+import * as BufferGeometryUtils from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 // Node.js の __dirname と __filename を取得
 const __filename = fileURLToPath(import.meta.url);
@@ -47,7 +48,7 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
     // ワールド行列を更新
     scene.updateMatrixWorld(true);
 
-    let innerMesh: THREE.Mesh | null = null;
+    let innerMesh: THREE.Mesh = undefined!;
 
     // "inner" メッシュを検索
     scene.traverse((child) => {
@@ -64,10 +65,16 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
     console.log('"inner" メッシュを見つけました。');
 
     // メッシュのワールド行列を適用したジオメトリをクローン
-    const transformedGeometry = (innerMesh as THREE.Mesh).geometry.clone();
+    let transformedGeometry = innerMesh.geometry.clone();
 
     // ジオメトリにメッシュのワールド行列を適用
-    transformedGeometry.applyMatrix4((innerMesh as THREE.Mesh).matrixWorld);
+    transformedGeometry.applyMatrix4(innerMesh.matrixWorld);
+
+    // ジオメトリがインデックスを持っていることを確認
+    if (!transformedGeometry.index) {
+      transformedGeometry =
+        BufferGeometryUtils.mergeVertices(transformedGeometry);
+    }
 
     // 法線を再計算（変換後のジオメトリに対して必要）
     transformedGeometry.computeVertexNormals();
@@ -75,7 +82,7 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
     console.log("ジオメトリの変換と法線の再計算を完了しました。");
 
     // SDFの生成
-    const sdfSize = 64; // 必要に応じて解像度を調整
+    const sdfSize = 1024; // 必要に応じて解像度を調整
     console.log(`SDFの解像度を設定しました: ${sdfSize}`);
 
     const sdfData = await createSDF(transformedGeometry, sdfSize);
@@ -141,9 +148,22 @@ async function createSDF(
   geometry.boundsTree = bvh; // boundsTree を設定
   console.log("BVHの構築が完了しました。");
 
-  // Raycasterをセットアップ（符号決定用）
+  // 一時的なメッシュを作成（レイキャスト用）
+  const tempMesh = new THREE.Mesh(geometry);
+
+  // Raycasterをセットアップ
   const raycaster = new THREE.Raycaster();
-  raycaster.ray.direction.set(1, 0, 0); // X軸正方向にレイをキャスト
+  raycaster.firstHitOnly = false; // 全てのヒットを考慮
+
+  // レイの方向を定義
+  const directions = [
+    new THREE.Vector3(1, 0, 0), // +X
+    new THREE.Vector3(-1, 0, 0), // -X
+    new THREE.Vector3(0, 1, 0), // +Y
+    new THREE.Vector3(0, -1, 0), // -Y
+    new THREE.Vector3(0, 0, 1), // +Z
+    new THREE.Vector3(0, 0, -1), // -Z
+  ];
 
   // 各ボクセルについて距離を計算
   for (let z = 0; z < size; z++) {
@@ -158,7 +178,14 @@ async function createSDF(
         );
 
         // 点からの最短距離を計算
-        const distance = getSignedDistance(point, geometry, bvh, raycaster);
+        const distance = getSignedDistance(
+          point,
+          geometry,
+          bvh,
+          raycaster,
+          tempMesh,
+          directions
+        );
         sdfData[idx] = distance;
       }
     }
@@ -173,30 +200,36 @@ function getSignedDistance(
   point: THREE.Vector3,
   geometry: THREE.BufferGeometry,
   bvh: MeshBVH,
-  raycaster: THREE.Raycaster
+  raycaster: THREE.Raycaster,
+  tempMesh: THREE.Mesh,
+  directions: THREE.Vector3[]
 ): number {
   // 点からの最短距離を計算
-  const hitResult: HitPointInfo = {
+  const hit: {
+    point: THREE.Vector3;
+    distance: number;
+    faceIndex: number;
+  } = {
     point: new THREE.Vector3(),
     distance: Infinity,
     faceIndex: -1,
   };
 
-  const closestPointInfo = bvh.closestPointToPoint(point, hitResult);
+  bvh.closestPointToPoint(point, hit);
 
-  if (!closestPointInfo) {
-    // 点がメッシュから離れている場合
-    return 0;
+  const distance = hit.distance;
+
+  // 複数のレイで内外判定を行う
+  let totalIntersections = 0;
+
+  for (const dir of directions) {
+    raycaster.set(point, dir);
+    const intersects = raycaster.intersectObject(tempMesh, true);
+    totalIntersections += intersects.length;
   }
 
-  const distance = closestPointInfo.distance;
-
-  // 符号の決定: 点がメッシュの内側か外側かを判定
-  // レイキャストを使用して判定
-  raycaster.set(point, raycaster.ray.direction);
-  const intersects = raycaster.intersectObject(new THREE.Mesh(geometry), true);
-
-  const isInside = intersects.length % 2 === 1;
+  // 総交差数が偶数なら外側、奇数なら内側
+  const isInside = totalIntersections % 2 === 1;
 
   const sign = isInside ? -1 : 1;
 
