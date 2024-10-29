@@ -3,7 +3,14 @@ import React, { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { EXRLoader } from "three/examples/jsm/loaders/EXRLoader.js";
-import { GPUComputationRenderer } from "three/examples/jsm/misc/GPUComputationRenderer.js";
+import {
+  GPUComputationRenderer,
+  Variable,
+} from "three/examples/jsm/misc/GPUComputationRenderer.js";
+
+interface GPUComputationRendererExtended extends GPUComputationRenderer {
+  variables: Variable[];
+}
 
 const App: React.FC = () => {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -14,7 +21,7 @@ const App: React.FC = () => {
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const animationFrameIdRef = useRef<number | null>(null);
   const isDraggingRef = useRef<boolean>(false);
-  const gpuComputeRef = useRef<GPUComputationRenderer | null>(null);
+  const gpuComputeRef = useRef<GPUComputationRendererExtended | null>(null);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -41,10 +48,20 @@ const App: React.FC = () => {
         camera.position.z = 2.5;
         cameraRef.current = camera;
 
-        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        // WebGL2コンテキストの確認
+        const renderer = new THREE.WebGLRenderer({
+          antialias: true,
+          powerPreference: "high-performance",
+        });
         renderer.setSize(mount.clientWidth, mount.clientHeight);
         renderer.setPixelRatio(window.devicePixelRatio);
         renderer.setClearColor(0x000000, 1); // 背景色を黒に設定
+
+        // WebGL2がサポートされているか確認
+        if (!renderer.capabilities.isWebGL2) {
+          console.error("WebGL2がサポートされていません。");
+          return;
+        }
 
         mount.appendChild(renderer.domElement);
         rendererRef.current = renderer;
@@ -120,14 +137,54 @@ const App: React.FC = () => {
         renderer.domElement.addEventListener("mousemove", onMouseMove);
 
         // アニメーションループ
+        const clock = new THREE.Clock();
+
         const animate = () => {
           if (canceled) return;
 
           if (!rendererRef.current || !sceneRef.current || !cameraRef.current)
             return;
 
+          const delta = clock.getDelta();
+
           if (gpuComputeRef.current) {
-            gpuComputeRef.current.compute();
+            const gpuCompute = gpuComputeRef.current;
+
+            // 更新シェーダーのUniformにdeltaとtimeを設定
+            const velocityVariable = gpuCompute.variables.find(
+              (v) => v.name === "textureVelocity"
+            );
+            const positionVariable = gpuCompute.variables.find(
+              (v) => v.name === "texturePosition"
+            );
+
+            if (velocityVariable && velocityVariable.material.uniforms) {
+              velocityVariable.material.uniforms["delta"].value = delta;
+              velocityVariable.material.uniforms["time"].value += delta;
+            }
+            if (positionVariable && positionVariable.material.uniforms) {
+              positionVariable.material.uniforms["delta"].value = delta;
+            }
+
+            // GPU計算を実行
+            gpuCompute.compute();
+
+            // パーティクルのシェーダーに新しいテクスチャを渡す
+            const particles = sceneRef.current.children.find(
+              (child) => (child as THREE.Points).isPoints
+            ) as THREE.Points | undefined;
+
+            if (
+              particles &&
+              particles.material instanceof THREE.ShaderMaterial
+            ) {
+              if (velocityVariable && positionVariable) {
+                particles.material.uniforms["texturePosition"].value =
+                  gpuCompute.getCurrentRenderTarget(positionVariable).texture;
+                particles.material.uniforms["textureVelocity"].value =
+                  gpuCompute.getCurrentRenderTarget(velocityVariable).texture;
+              }
+            }
           }
 
           rendererRef.current.render(sceneRef.current, cameraRef.current);
@@ -188,7 +245,11 @@ const App: React.FC = () => {
       renderer: THREE.WebGLRenderer
     ) => {
       const numParticles = 256 * 256; // 粒子数
-      const gpuCompute = new GPUComputationRenderer(256, 256, renderer);
+      const gpuCompute = new GPUComputationRenderer(
+        256,
+        256,
+        renderer
+      ) as GPUComputationRendererExtended;
       gpuComputeRef.current = gpuCompute;
 
       // **SDFテクスチャを事前に生成されたファイルから読み込む**
@@ -203,8 +264,8 @@ const App: React.FC = () => {
       const dtPosition = gpuCompute.createTexture();
       const dtVelocity = gpuCompute.createTexture();
 
-      // 初期位置と速度を設定
-      fillPositionTexture(dtPosition);
+      // 初期位置と速度を設定（SDF範囲内）
+      fillPositionTexture(dtPosition, sdfMin, sdfMax);
       fillVelocityTexture(dtVelocity);
 
       // シェーダーの読み込み
@@ -218,6 +279,13 @@ const App: React.FC = () => {
         velocityShader(),
         dtVelocity
       );
+
+      if (positionVariable === null || velocityVariable === null) {
+        console.error(
+          "GPUComputationRendererの変数が正しく設定されていません。"
+        );
+        return;
+      }
 
       // デペンデンシーの設定
       gpuCompute.setVariableDependencies(positionVariable, [
@@ -271,6 +339,10 @@ const App: React.FC = () => {
       const material = new THREE.ShaderMaterial({
         uniforms: {
           texturePosition: { value: null },
+          textureVelocity: { value: null },
+          sdfTexture: { value: sdfTexture },
+          sdfMin: { value: sdfMin },
+          sdfMax: { value: sdfMax },
         },
         vertexShader: particleVertexShader(),
         fragmentShader: particleFragmentShader(),
@@ -279,31 +351,6 @@ const App: React.FC = () => {
 
       const particles = new THREE.Points(geometry, material);
       scene.add(particles);
-
-      // アニメーションループ内でテクスチャを更新
-      const clock = new THREE.Clock();
-
-      const animateParticles = () => {
-        if (
-          gpuComputeRef.current &&
-          velocityVariable.material.uniforms["time"]
-        ) {
-          const delta = clock.getDelta();
-          velocityVariable.material.uniforms["delta"].value = delta;
-          velocityVariable.material.uniforms["time"].value += delta;
-
-          positionVariable.material.uniforms["delta"].value = delta;
-
-          gpuCompute.compute();
-
-          material.uniforms["texturePosition"].value =
-            gpuCompute.getCurrentRenderTarget(positionVariable).texture;
-        }
-
-        requestAnimationFrame(animateParticles);
-      };
-
-      animateParticles();
     };
 
     // SDFテクスチャを読み込む関数を追加
@@ -316,6 +363,9 @@ const App: React.FC = () => {
       max: THREE.Vector3;
     }> => {
       const response = await fetch(path);
+      if (!response.ok) {
+        throw new Error(`Failed to load SDF texture from ${path}`);
+      }
       const sdfJson = await response.json();
 
       const size = sdfJson.size;
@@ -328,6 +378,9 @@ const App: React.FC = () => {
       texture.type = THREE.FloatType;
       texture.minFilter = THREE.LinearFilter;
       texture.magFilter = THREE.LinearFilter;
+      texture.wrapS = THREE.ClampToEdgeWrapping;
+      texture.wrapT = THREE.ClampToEdgeWrapping;
+      texture.wrapR = THREE.ClampToEdgeWrapping;
       texture.unpackAlignment = 1;
       texture.needsUpdate = true;
 
@@ -335,13 +388,17 @@ const App: React.FC = () => {
     };
 
     // 位置テクスチャの初期化
-    const fillPositionTexture = (texture: THREE.DataTexture) => {
+    const fillPositionTexture = (
+      texture: THREE.DataTexture,
+      min: THREE.Vector3,
+      max: THREE.Vector3
+    ) => {
       const data = texture.image.data;
 
       for (let i = 0; i < data.length; i += 4) {
-        data[i] = (Math.random() - 0.5) * 0.1; // x
-        data[i + 1] = Math.random() * 0.05 - 0.95; // y
-        data[i + 2] = (Math.random() - 0.5) * 0.1; // z
+        data[i] = THREE.MathUtils.lerp(min.x, max.x, Math.random()); // x
+        data[i + 1] = THREE.MathUtils.lerp(min.y, max.y, Math.random()); // y
+        data[i + 2] = THREE.MathUtils.lerp(min.z, max.z, Math.random()); // z
         data[i + 3] = 1.0; // w
       }
     };
@@ -389,19 +446,29 @@ const App: React.FC = () => {
         // SDFの勾配から法線を計算
         vec3 computeNormal(vec3 sdfUV) {
           float eps = 1.0 / float(sdfSize);
-          float sdfX1 = texture(sdfTexture, sdfUV + vec3(eps, 0.0, 0.0)).r;
-          float sdfX2 = texture(sdfTexture, sdfUV - vec3(eps, 0.0, 0.0)).r;
-          float sdfY1 = texture(sdfTexture, sdfUV + vec3(0.0, eps, 0.0)).r;
-          float sdfY2 = texture(sdfTexture, sdfUV - vec3(0.0, eps, 0.0)).r;
-          float sdfZ1 = texture(sdfTexture, sdfUV + vec3(0.0, 0.0, eps)).r;
-          float sdfZ2 = texture(sdfTexture, sdfUV - vec3(0.0, 0.0, eps)).r;
-
+          
+          // サンプリング位置をclamp
+          vec3 sdfUVPlusX = clamp(sdfUV + vec3(eps, 0.0, 0.0), vec3(0.0), vec3(1.0));
+          vec3 sdfUVMinusX = clamp(sdfUV - vec3(eps, 0.0, 0.0), vec3(0.0), vec3(1.0));
+          float sdfX1 = texture(sdfTexture, sdfUVPlusX).r;
+          float sdfX2 = texture(sdfTexture, sdfUVMinusX).r;
+          
+          vec3 sdfUVPlusY = clamp(sdfUV + vec3(0.0, eps, 0.0), vec3(0.0), vec3(1.0));
+          vec3 sdfUVMinusY = clamp(sdfUV - vec3(0.0, eps, 0.0), vec3(0.0), vec3(1.0));
+          float sdfY1 = texture(sdfTexture, sdfUVPlusY).r;
+          float sdfY2 = texture(sdfTexture, sdfUVMinusY).r;
+          
+          vec3 sdfUVPlusZ = clamp(sdfUV + vec3(0.0, 0.0, eps), vec3(0.0), vec3(1.0));
+          vec3 sdfUVMinusZ = clamp(sdfUV - vec3(0.0, 0.0, eps), vec3(0.0), vec3(1.0));
+          float sdfZ1 = texture(sdfTexture, sdfUVPlusZ).r;
+          float sdfZ2 = texture(sdfTexture, sdfUVMinusZ).r;
+          
           vec3 normal = normalize(vec3(
             sdfX1 - sdfX2,
             sdfY1 - sdfY2,
             sdfZ1 - sdfZ2
           ));
-
+          
           return normal;
         }
 
@@ -413,11 +480,12 @@ const App: React.FC = () => {
           // 重力の適用
           vel.xyz += gravity * delta;
 
-          // 衝突判定
+          // SDF範囲内に正規化
           vec3 sdfUV = (pos.xyz - sdfMin) / (sdfMax - sdfMin);
+          sdfUV = clamp(sdfUV, vec3(0.0), vec3(1.0));
           float sdfValue = texture(sdfTexture, sdfUV).r;
 
-          if (sdfValue < 0.0) {
+          if (sdfValue > 0.0) { // 外側に出た場合
             // 壁に衝突している場合、法線方向に反射
             vec3 normal = computeNormal(sdfUV);
             vel.xyz = reflect(vel.xyz, normal) * 0.5; // 速度を減衰
@@ -432,9 +500,22 @@ const App: React.FC = () => {
     const particleVertexShader = () => {
       return `
         uniform sampler2D texturePosition;
+        uniform sampler3D sdfTexture;
+        uniform vec3 sdfMin;
+        uniform vec3 sdfMax;
+
+        varying float vSdfValue;
 
         void main() {
           vec4 pos = texture2D(texturePosition, uv);
+
+          // SDF値を計算
+          vec3 sdfUV = (pos.xyz - sdfMin) / (sdfMax - sdfMin);
+          sdfUV = clamp(sdfUV, vec3(0.0), vec3(1.0));
+          float sdfValue = texture(sdfTexture, sdfUV).r;
+
+          vSdfValue = sdfValue;
+
           gl_Position = projectionMatrix * modelViewMatrix * vec4(pos.xyz, 1.0);
           gl_PointSize = 1.0;
         }
@@ -444,8 +525,15 @@ const App: React.FC = () => {
     // パーティクルのフラグメントシェーダー
     const particleFragmentShader = () => {
       return `
+        varying float vSdfValue;
+
         void main() {
-          gl_FragColor = vec4(1.0, 0.9, 0.5, 1.0); // 砂の色
+          // sdfValue < 0.0なら砂色、>=0.0なら破棄
+          if (vSdfValue < 0.0) {
+            gl_FragColor = vec4(1.0, 0.5, 0.0, 1.0); // 砂色
+          } else {
+            discard; // 内側のみ表示
+          }
         }
       `;
     };
