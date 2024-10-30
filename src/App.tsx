@@ -22,6 +22,7 @@ const App: React.FC = () => {
   const animationFrameIdRef = useRef<number | null>(null);
   const isDraggingRef = useRef<boolean>(false);
   const gpuComputeRef = useRef<GPUComputationRendererExtended | null>(null);
+  const rotationMatrixRef = useRef<THREE.Matrix4>(new THREE.Matrix4());
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -152,6 +153,11 @@ const App: React.FC = () => {
           if (gpuComputeRef.current) {
             const gpuCompute = gpuComputeRef.current;
 
+            // シーンの回転から回転行列を更新
+            rotationMatrixRef.current.makeRotationFromEuler(
+              sceneRef.current.rotation
+            );
+
             // 更新シェーダーのUniformにdeltaとtimeを設定
             const velocityVariable = gpuCompute.variables.find(
               (v) => v.name === "textureVelocity"
@@ -163,6 +169,8 @@ const App: React.FC = () => {
             if (velocityVariable && velocityVariable.material.uniforms) {
               velocityVariable.material.uniforms["delta"].value = delta;
               velocityVariable.material.uniforms["time"].value += delta;
+              velocityVariable.material.uniforms["rotationMatrix"].value =
+                rotationMatrixRef.current;
             }
             if (positionVariable && positionVariable.material.uniforms) {
               positionVariable.material.uniforms["delta"].value = delta;
@@ -309,6 +317,9 @@ const App: React.FC = () => {
       velocityVariable.material.uniforms["sdfSize"] = { value: sdfSize };
       velocityVariable.material.uniforms["sdfMin"] = { value: sdfMin };
       velocityVariable.material.uniforms["sdfMax"] = { value: sdfMax };
+      velocityVariable.material.uniforms["rotationMatrix"] = {
+        value: rotationMatrixRef.current,
+      };
 
       positionVariable.material.uniforms["delta"] = { value: 0.0 };
       positionVariable.material.uniforms["sdfTexture"] = { value: sdfTexture };
@@ -445,38 +456,24 @@ const App: React.FC = () => {
         uniform int sdfSize;
         uniform vec3 sdfMin;
         uniform vec3 sdfMax;
-    
-        vec3 computeNormal(vec3 sdfUV) {
-          float eps = 1.0 / float(sdfSize);
-    
-          // Compute gradient of the SDF to find the normal
-          vec3 grad;
-          grad.x = texture(sdfTexture, sdfUV + vec3(eps, 0.0, 0.0)).r - texture(sdfTexture, sdfUV - vec3(eps, 0.0, 0.0)).r;
-          grad.y = texture(sdfTexture, sdfUV + vec3(0.0, eps, 0.0)).r - texture(sdfTexture, sdfUV - vec3(0.0, eps, 0.0)).r;
-          grad.z = texture(sdfTexture, sdfUV + vec3(0.0, 0.0, eps)).r - texture(sdfTexture, sdfUV - vec3(0.0, 0.0, eps)).r;
-    
-          return normalize(grad);
-        }
-    
+        
         void main() {
           vec2 uv = gl_FragCoord.xy / resolution.xy;
           vec4 pos = texture2D(texturePosition, uv);
           vec4 vel = texture2D(textureVelocity, uv);
-    
-          pos.xyz += vel.xyz * delta;
-    
-          // Normalize position within SDF bounds
-          vec3 sdfUV = (pos.xyz - sdfMin) / (sdfMax - sdfMin);
-          sdfUV = clamp(sdfUV, vec3(0.0), vec3(1.0));
-          float sdfValue = texture(sdfTexture, sdfUV).r;
-    
-          if (sdfValue > 0.0) {
-            // Move the particle back inside the SDF
-            vec3 normal = computeNormal(sdfUV);
-            pos.xyz -= sdfValue * normal;
+          
+          // Verlet積分による位置更新
+          vec3 newPos = pos.xyz + vel.xyz * delta;
+          
+          // 位置の制約（境界チェック）
+          vec3 sdfUV = (newPos - sdfMin) / (sdfMax - sdfMin);
+          if(sdfUV.x < 0.0 || sdfUV.x > 1.0 ||
+             sdfUV.y < 0.0 || sdfUV.y > 1.0 ||
+             sdfUV.z < 0.0 || sdfUV.z > 1.0) {
+            newPos = pos.xyz;
           }
-    
-          gl_FragColor = pos;
+          
+          gl_FragColor = vec4(newPos, 1.0);
         }
       `;
     };
@@ -491,39 +488,86 @@ const App: React.FC = () => {
         uniform int sdfSize;
         uniform vec3 sdfMin;
         uniform vec3 sdfMax;
-    
+        uniform mat4 rotationMatrix;
+
+        const float COLLISION_DAMPING = 0.5;
+        const float FRICTION = 0.98;
+        const float PARTICLE_RADIUS = 0.02;
+        const int MAX_COLLISION_ITERATIONS = 3;
+
         vec3 computeNormal(vec3 sdfUV) {
           float eps = 1.0 / float(sdfSize);
-    
-          // Compute gradient of the SDF to find the normal
           vec3 grad;
           grad.x = texture(sdfTexture, sdfUV + vec3(eps, 0.0, 0.0)).r - texture(sdfTexture, sdfUV - vec3(eps, 0.0, 0.0)).r;
           grad.y = texture(sdfTexture, sdfUV + vec3(0.0, eps, 0.0)).r - texture(sdfTexture, sdfUV - vec3(0.0, eps, 0.0)).r;
           grad.z = texture(sdfTexture, sdfUV + vec3(0.0, 0.0, eps)).r - texture(sdfTexture, sdfUV - vec3(0.0, 0.0, eps)).r;
-    
           return normalize(grad);
         }
-    
+
+        float getSDF(vec3 pos) {
+          vec3 sdfUV = (pos - sdfMin) / (sdfMax - sdfMin);
+          sdfUV = clamp(sdfUV, vec3(0.0), vec3(1.0));
+          return texture(sdfTexture, sdfUV).r;
+        }
+
         void main() {
           vec2 uv = gl_FragCoord.xy / resolution.xy;
           vec4 pos = texture2D(texturePosition, uv);
           vec4 vel = texture2D(textureVelocity, uv);
-    
-          // Apply gravity
-          vel.xyz += gravity * delta;
-    
-          // Normalize position within SDF bounds
-          vec3 sdfUV = (pos.xyz - sdfMin) / (sdfMax - sdfMin);
-          sdfUV = clamp(sdfUV, vec3(0.0), vec3(1.0));
-          float sdfValue = texture(sdfTexture, sdfUV).r;
-    
-          if (sdfValue > 0.0) { // If outside the SDF
-            // Compute the normal from the SDF gradient
-            vec3 normal = computeNormal(sdfUV);
-            // Reflect the velocity vector
-            vel.xyz = reflect(vel.xyz, normal) * 0.5; // Apply damping factor
+
+          // 回転行列を適用した重力を計算
+          vec3 rotatedGravity = (rotationMatrix * vec4(gravity, 0.0)).xyz;
+          
+          // 重力を適用
+          vel.xyz += rotatedGravity * delta;
+          
+          // 摩擦を適用
+          vel.xyz *= FRICTION;
+
+          // パーティクル同士の衝突と壁との衝突を処理
+          vec3 newPos = pos.xyz + vel.xyz * delta;
+          
+          // 複数回の衝突解決イテレーション
+          for(int i = 0; i < MAX_COLLISION_ITERATIONS; i++) {
+            float sdf = getSDF(newPos);
+            
+            if(sdf > 0.0) {
+              vec3 sdfUV = (newPos - sdfMin) / (sdfMax - sdfMin);
+              sdfUV = clamp(sdfUV, vec3(0.0), vec3(1.0));
+              vec3 normal = computeNormal(sdfUV);
+              
+              // 壁からの押し戻し
+              newPos -= (sdf + PARTICLE_RADIUS) * normal;
+              
+              // 速度の反射と減衰
+              float normalVel = dot(vel.xyz, normal);
+              if(normalVel < 0.0) {
+                vel.xyz = (vel.xyz - 2.0 * normalVel * normal) * COLLISION_DAMPING;
+              }
+            }
           }
-    
+
+          // パーティクル同士の簡易的な相互作用
+          float repulsionRadius = PARTICLE_RADIUS * 2.0;
+          for(float dx = -1.0; dx <= 1.0; dx += 1.0) {
+            for(float dy = -1.0; dy <= 1.0; dy += 1.0) {
+              if(dx == 0.0 && dy == 0.0) continue;
+              
+              vec2 neighborUV = uv + vec2(dx, dy) / resolution.xy;
+              if(neighborUV.x < 0.0 || neighborUV.x > 1.0 || 
+                 neighborUV.y < 0.0 || neighborUV.y > 1.0) continue;
+              
+              vec4 neighborPos = texture2D(texturePosition, neighborUV);
+              vec3 diff = pos.xyz - neighborPos.xyz;
+              float dist = length(diff);
+              
+              if(dist < repulsionRadius && dist > 0.0) {
+                vec3 repulsion = normalize(diff) * (repulsionRadius - dist);
+                vel.xyz += repulsion * 0.5;
+              }
+            }
+          }
+
           gl_FragColor = vel;
         }
       `;
@@ -565,9 +609,9 @@ const App: React.FC = () => {
           if (vSdfValue < 0.0) {
             gl_FragColor = vec4(0.86, 0.83, 0.7, 1.0); // 砂色
           } else {
-            // discard; // 内側のみ表示
+            discard; // 内側のみ表示
           //  gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); // 黒色
-          gl_FragColor = vec4(0.86, 0.83, 0.7, 1.0); // 砂色
+          // gl_FragColor = vec4(0.86, 0.83, 0.7, 1.0); // 砂色
           }
         }
       `;
