@@ -82,7 +82,7 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
     console.log("ジオメトリの変換と法線の再計算を完了しました。");
 
     // SDFの生成
-    const sdfSize = 1024; // 必要に応じて解像度を調整
+    const sdfSize = 128; // 必要に応じて解像度を調整
     console.log(`SDFの解像度を設定しました: ${sdfSize}`);
 
     const sdfData = await createSDF(transformedGeometry, sdfSize);

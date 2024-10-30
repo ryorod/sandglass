@@ -563,10 +563,11 @@ const App: React.FC = () => {
         void main() {
           // sdfValue < 0.0なら砂色、>=0.0なら破棄
           if (vSdfValue < 0.0) {
-            gl_FragColor = vec4(1.0, 0.5, 0.0, 1.0); // 砂色
+            gl_FragColor = vec4(0.86, 0.83, 0.7, 1.0); // 砂色
           } else {
             // discard; // 内側のみ表示
-           gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); // 黒色
+          //  gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); // 黒色
+          gl_FragColor = vec4(0.86, 0.83, 0.7, 1.0); // 砂色
           }
         }
       `;
