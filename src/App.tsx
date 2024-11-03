@@ -7,6 +7,7 @@ import {
   GPUComputationRenderer,
   Variable,
 } from "three/examples/jsm/misc/GPUComputationRenderer.js";
+import Info from "./components/Info";
 
 interface GPUComputationRendererExtended extends GPUComputationRenderer {
   variables: Variable[];
@@ -46,7 +47,7 @@ const App: React.FC = () => {
           0.1,
           1000
         );
-        camera.position.z = 2.5;
+        camera.position.z = 2;
         cameraRef.current = camera;
 
         // WebGL2コンテキストの確認
@@ -726,8 +727,15 @@ const App: React.FC = () => {
   return (
     <div
       ref={mountRef}
-      style={{ width: "100vw", height: "100vh", overflow: "hidden" }}
-    />
+      style={{
+        width: "100vw",
+        height: "100vh",
+        overflow: "hidden",
+        position: "relative",
+      }}
+    >
+      <Info />
+    </div>
   );
 };
 
