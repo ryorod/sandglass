@@ -71,10 +71,6 @@ const App: React.FC = () => {
         const ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
         scene.add(ambientLight);
 
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 2.0);
-        directionalLight.position.set(10, 10, 10);
-        scene.add(directionalLight);
-
         // 環境マップの読み込み
         const environmentMap = await loadEnvironment(renderer, scene);
 
