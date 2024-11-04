@@ -1,8 +1,8 @@
 export const ENVIRONMENT_MAPS = {
   1: "/tex/kloppenheim_06_puresky_4k.exr",
-  2: "/tex/venice_sunset_4k.exr",
-  3: "/tex/royal_esplanade_4k.exr",
-  4: "/tex/empty_warehouse_4k.exr",
+  2: "/tex/overcast_soil_puresky_4k.exr",
+  3: "/tex/table_mountain_1_puresky_4k.exr",
+  4: "/tex/belfast_sunset_puresky_4k.exr",
 } as const;
 
 export const GLB_PATH = "/model/sandglass.glb";

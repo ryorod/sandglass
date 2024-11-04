@@ -8,7 +8,12 @@ import {
   Variable,
 } from "three/examples/jsm/misc/GPUComputationRenderer.js";
 import Info from "./components/Info";
-import { GLB_PATH, NUM_PARTICLES, SDF_PATH } from "./constants/config";
+import {
+  ENVIRONMENT_MAPS,
+  GLB_PATH,
+  NUM_PARTICLES,
+  SDF_PATH,
+} from "./constants/config";
 
 interface GPUComputationRendererExtended extends GPUComputationRenderer {
   variables: Variable[];
@@ -25,6 +30,7 @@ const App: React.FC = () => {
   const isDraggingRef = useRef<boolean>(false);
   const gpuComputeRef = useRef<GPUComputationRendererExtended | null>(null);
   const rotationMatrixRef = useRef<THREE.Matrix4>(new THREE.Matrix4());
+  const currentEnvMapRef = useRef<THREE.Texture | null>(null);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -74,7 +80,11 @@ const App: React.FC = () => {
         scene.add(ambientLight);
 
         // 環境マップの読み込み
-        const environmentMap = await loadEnvironment(renderer, scene);
+        const environmentMap = await loadEnvironment(
+          renderer,
+          scene,
+          ENVIRONMENT_MAPS[1]
+        );
 
         // GLBモデルの読み込み
         const gltfLoader = new GLTFLoader();
@@ -213,12 +223,13 @@ const App: React.FC = () => {
     // 環境マップの読み込み関数
     const loadEnvironment = async (
       renderer: THREE.WebGLRenderer,
-      scene: THREE.Scene
+      scene: THREE.Scene,
+      path: string
     ): Promise<THREE.Texture> => {
       return new Promise((resolve, reject) => {
         const exrLoader = new EXRLoader();
         exrLoader.load(
-          "/tex/kloppenheim_06_puresky_4k.exr", // EXRファイルのパスを指定
+          path,
           (texture) => {
             texture.mapping = THREE.EquirectangularReflectionMapping;
             texture.colorSpace = THREE.SRGBColorSpace;
@@ -234,6 +245,12 @@ const App: React.FC = () => {
 
             // 背景には元の高解像度テクスチャを使用
             scene.background = texture;
+
+            // 以前の環境マップを破棄
+            if (currentEnvMapRef.current) {
+              currentEnvMapRef.current.dispose();
+            }
+            currentEnvMapRef.current = envMap;
 
             // 不要なリソースを解放
             pmremGenerator.dispose();
@@ -692,10 +709,44 @@ const App: React.FC = () => {
 
     window.addEventListener("resize", onWindowResize);
 
+    // キーボードイベントハンドラ
+    const handleKeyDown = async (event: KeyboardEvent) => {
+      const key = event.key;
+      if (!rendererRef.current || !sceneRef.current) return;
+
+      if (key in ENVIRONMENT_MAPS) {
+        const mapPath =
+          ENVIRONMENT_MAPS[key as unknown as keyof typeof ENVIRONMENT_MAPS];
+        try {
+          const newEnvMap = await loadEnvironment(
+            rendererRef.current,
+            sceneRef.current,
+            mapPath
+          );
+
+          // ガラスマテリアルの環境マップを更新
+          sceneRef.current.traverse((child) => {
+            if ((child as THREE.Mesh).isMesh) {
+              const mesh = child as THREE.Mesh;
+              if (mesh.material instanceof THREE.MeshPhysicalMaterial) {
+                mesh.material.envMap = newEnvMap;
+                mesh.material.needsUpdate = true;
+              }
+            }
+          });
+        } catch (error) {
+          console.error("環境マップの読み込みに失敗しました:", error);
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
     // クリーンアップ
     return () => {
       canceled = true;
       window.removeEventListener("resize", onWindowResize);
+      window.removeEventListener("keydown", handleKeyDown);
 
       if (animationFrameIdRef.current !== null) {
         cancelAnimationFrame(animationFrameIdRef.current);
