@@ -8,6 +8,7 @@ import {
   Variable,
 } from "three/examples/jsm/misc/GPUComputationRenderer.js";
 import Info from "./components/Info";
+import { GLB_PATH, NUM_PARTICLES, SDF_PATH } from "./constants/config";
 
 interface GPUComputationRendererExtended extends GPUComputationRenderer {
   variables: Variable[];
@@ -77,12 +78,11 @@ const App: React.FC = () => {
 
         // GLBモデルの読み込み
         const gltfLoader = new GLTFLoader();
-        const glbPath = "/model/sandglass.glb"; // GLBファイルのパスを指定
 
         let innerMesh: THREE.Mesh | null = null;
 
         gltfLoader.load(
-          glbPath,
+          GLB_PATH,
           (gltf) => {
             const sandglassModel = gltf.scene;
             scene.add(sandglassModel);
@@ -257,7 +257,6 @@ const App: React.FC = () => {
       scene: THREE.Scene,
       renderer: THREE.WebGLRenderer
     ) => {
-      const numParticles = 1024 * 1024; // 粒子数
       const gpuCompute = new GPUComputationRenderer(
         256,
         256,
@@ -267,7 +266,7 @@ const App: React.FC = () => {
 
       // **SDFテクスチャを事前に生成されたファイルから読み込む**
       // SDFテクスチャを読み込む
-      const sdfResult = await loadSDFTexture("/sdf/sandglass_sdf.json");
+      const sdfResult = await loadSDFTexture(SDF_PATH);
       const sdfTexture = sdfResult.texture;
       const sdfSize = sdfResult.size;
       const sdfMin = sdfResult.min;
@@ -338,12 +337,12 @@ const App: React.FC = () => {
 
       // パーティクルの描画用メッシュを作成
       const geometry = new THREE.BufferGeometry();
-      const positions = new Float32Array(numParticles * 3);
+      const positions = new Float32Array(NUM_PARTICLES * 3);
 
       // UV を手動で初期化
-      const uvs = new Float32Array(numParticles * 2);
+      const uvs = new Float32Array(NUM_PARTICLES * 2);
 
-      for (let i = 0; i < numParticles; i++) {
+      for (let i = 0; i < NUM_PARTICLES; i++) {
         const x = (i % 256) / 256;
         const y = Math.floor(i / 256) / 256;
         uvs[i * 2] = x;
