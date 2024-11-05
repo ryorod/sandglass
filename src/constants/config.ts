@@ -3,6 +3,7 @@ export const ENVIRONMENT_MAPS = {
   2: "/tex/overcast_soil_puresky_4k.exr",
   3: "/tex/table_mountain_1_puresky_4k.exr",
   4: "/tex/belfast_sunset_puresky_4k.exr",
+  5: "/tex/starmap_2020_4k.exr",
 } as const;
 
 export const GLB_PATH = "/model/sandglass.glb";
