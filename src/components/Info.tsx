@@ -25,7 +25,7 @@ export default function Info() {
       }}
     >
       <p>TIME&ensp;{date.format("HH : mm : ss")}</p>
-      <p>DATE&ensp;{date.format("YYYY - MM - DD ddd")}</p>
+      <p>DATE&ensp;{date.format("YYYY - MM - DD ddd").toUpperCase()}</p>
       <p>TIME ZONE ASIA / TOKYO</p>
       <p>TEMPERATURE&ensp;14.5℃</p>
       <p>WIND SPEED&ensp;3.7 KM/H&ensp;|&ensp;DIRECTION&ensp;SOUTH</p>
