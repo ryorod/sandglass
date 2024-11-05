@@ -24,8 +24,8 @@ export default function Info() {
         color: "white",
       }}
     >
-      <p>TIME&ensp;{date.format("HH : mm")}</p>
-      <p>DATE&ensp;{date.format("YYYY - MM - DD")} T</p>
+      <p>TIME&ensp;{date.format("HH : mm : ss")}</p>
+      <p>DATE&ensp;{date.format("YYYY - MM - DD ddd")}</p>
       <p>TIME ZONE ASIA / TOKYO</p>
       <p>TEMPERATURE&ensp;14.5℃</p>
       <p>WIND SPEED&ensp;3.7 KM/H&ensp;|&ensp;DIRECTION&ensp;SOUTH</p>
