@@ -21,6 +21,7 @@ export default function Info() {
         fontSize: "30px",
         pointerEvents: "none",
         userSelect: "none",
+        color: "white",
       }}
     >
       <p>TIME&ensp;{date.format("HH : mm")}</p>

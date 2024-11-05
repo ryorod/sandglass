@@ -9,8 +9,11 @@ import {
 } from "three/examples/jsm/misc/GPUComputationRenderer.js";
 import Info from "./components/Info";
 import {
+  AUTO_ROTATION_SPEED,
+  CAMERA_ORBIT_RADIUS,
   ENVIRONMENT_MAPS,
   GLB_PATH,
+  INTERACTION_TIMEOUT,
   NUM_PARTICLES,
   SDF_PATH,
 } from "./constants/config";
@@ -31,6 +34,8 @@ const App: React.FC = () => {
   const gpuComputeRef = useRef<GPUComputationRendererExtended | null>(null);
   const rotationMatrixRef = useRef<THREE.Matrix4>(new THREE.Matrix4());
   const currentEnvMapRef = useRef<THREE.Texture | null>(null);
+  const autoRotationAngleRef = useRef<number>(0);
+  const lastInteractionTimeRef = useRef<number>(Date.now());
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -54,7 +59,7 @@ const App: React.FC = () => {
           0.1,
           1000
         );
-        camera.position.z = 2;
+        camera.position.z = CAMERA_ORBIT_RADIUS;
         cameraRef.current = camera;
 
         // WebGL2コンテキストの確認
@@ -156,6 +161,23 @@ const App: React.FC = () => {
             return;
 
           const delta = clock.getDelta();
+
+          // 自動回転の処理
+          const currentTime = Date.now();
+          if (
+            !isDraggingRef.current &&
+            currentTime - lastInteractionTimeRef.current > INTERACTION_TIMEOUT
+          ) {
+            autoRotationAngleRef.current += AUTO_ROTATION_SPEED;
+
+            // カメラを円軌道上で回転
+            const camera = cameraRef.current;
+            camera.position.x =
+              Math.sin(autoRotationAngleRef.current) * CAMERA_ORBIT_RADIUS;
+            camera.position.z =
+              Math.cos(autoRotationAngleRef.current) * CAMERA_ORBIT_RADIUS;
+            camera.lookAt(0, 0, 0);
+          }
 
           if (gpuComputeRef.current) {
             const gpuCompute = gpuComputeRef.current;
@@ -707,10 +729,12 @@ void main() {
     // マウスイベントの設定
     const onMouseDown = () => {
       isDraggingRef.current = true;
+      lastInteractionTimeRef.current = Date.now();
     };
 
     const onMouseUp = () => {
       isDraggingRef.current = false;
+      lastInteractionTimeRef.current = Date.now();
     };
 
     const onMouseMove = (event: MouseEvent) => {
@@ -725,6 +749,8 @@ void main() {
         // シーン全体を回転
         sceneRef.current.rotation.y += deltaMove.x * rotationSpeed;
         sceneRef.current.rotation.x += deltaMove.y * rotationSpeed;
+
+        lastInteractionTimeRef.current = Date.now();
       }
     };
 
