@@ -405,6 +405,8 @@ const App: React.FC = () => {
         vertexShader: particleVertexShader(),
         fragmentShader: particleFragmentShader(),
         transparent: true,
+        depthWrite: false,
+        depthTest: true,
       });
 
       const particles = new THREE.Points(geometry, material);
@@ -486,184 +488,169 @@ const App: React.FC = () => {
     const positionShader = () => {
       return `
         uniform float delta;
-  uniform sampler3D sdfTexture;
-  uniform int sdfSize;
-  uniform vec3 sdfMin;
-  uniform vec3 sdfMax;
-  
-  float getSDF(vec3 pos) {
-    vec3 sdfUV = (pos - sdfMin) / (sdfMax - sdfMin);
-    if(any(lessThan(sdfUV, vec3(0.0))) || any(greaterThan(sdfUV, vec3(1.0)))) {
-      return 1000.0;
-    }
-    return texture(sdfTexture, sdfUV).r;
-  }
-  
-  void main() {
-    vec2 uv = gl_FragCoord.xy / resolution.xy;
-    vec4 pos = texture2D(texturePosition, uv);
-    vec4 vel = texture2D(textureVelocity, uv);
+        uniform sampler3D sdfTexture;
+        uniform vec3 sdfMin;
+        uniform vec3 sdfMax;
     
-    // Verlet積分による位置更新
-    vec3 newPos = pos.xyz + vel.xyz * delta;
+        const float EPSILON = 0.001;
+        const float SDF_BOUNDARY = 0.01;
     
-    // SDFによる内外判定を保存
-    float sdf = getSDF(newPos);
+        float getRawSDF(vec3 pos) {
+            vec3 uv = (pos - sdfMin) / (sdfMax - sdfMin);
+            return texture(sdfTexture, clamp(uv, vec3(0.0), vec3(1.0))).r;
+        }
     
-    gl_FragColor = vec4(newPos, sdf < 0.0 ? -1.0 : 1.0); // w成分に内外判定を保存
-  }
+        float getSDF(vec3 pos) {
+            vec3 uv = (pos - sdfMin) / (sdfMax - sdfMin);
+            if(any(lessThan(uv, vec3(-0.1))) || any(greaterThan(uv, vec3(1.1)))) {
+                return 1000.0;
+            }
+            return getRawSDF(pos);
+        }
+    
+        vec3 getNormal(vec3 pos) {
+            vec2 e = vec2(EPSILON, 0.0);
+            return normalize(vec3(
+                getSDF(pos + e.xyy) - getSDF(pos - e.xyy),
+                getSDF(pos + e.yxy) - getSDF(pos - e.yxy),
+                getSDF(pos + e.yyx) - getSDF(pos - e.yyx)
+            ));
+        }
+    
+        void main() {
+            vec2 uv = gl_FragCoord.xy / resolution.xy;
+            vec4 posData = texture2D(texturePosition, uv);
+            vec4 velData = texture2D(textureVelocity, uv);
+            
+            vec3 pos = posData.xyz;
+            vec3 vel = velData.xyz;
+            
+            // 新しい位置の計算
+            vec3 newPos = pos + vel * delta;
+            
+            // SDF制約の適用
+            float sdf = getSDF(newPos);
+            if(sdf >= -SDF_BOUNDARY) {
+                vec3 normal = getNormal(newPos);
+                float penetration = sdf + SDF_BOUNDARY;
+                newPos = newPos - normal * penetration;
+                
+                // 追加の安全チェック
+                float finalSdf = getSDF(newPos);
+                if(finalSdf > 0.0) {
+                    // それでも内側にある場合は元の位置に戻す
+                    newPos = pos;
+                }
+            }
+            
+            // 最終的なSDF値を計算
+            float finalSdf = getSDF(newPos);
+            
+            gl_FragColor = vec4(newPos, finalSdf);
+        }
       `;
     };
 
     // 速度更新用のシェーダー
     const velocityShader = () => {
       return `
-uniform float time;
-uniform float delta;
-uniform vec3 gravity;
-uniform sampler3D sdfTexture;
-uniform int sdfSize;
-uniform vec3 sdfMin;
-uniform vec3 sdfMax;
-uniform mat4 rotationMatrix;
-
-// 物理パラメータの調整
-const float COLLISION_DAMPING = 0.3;      // 衝突時の減衰
-const float FRICTION = 0.98;              // 摩擦係数
-const float PARTICLE_RADIUS = 0.015;      // パーティクルサイズ
-const float REPULSION_STRENGTH = 1.5;     // 反発力
-const float PARTICLE_MASS = 0.5;          // 質量を増やして落下速度を調整
-const float MIN_VELOCITY = 0.001;
-const float SDF_THRESHOLD = 0.02;
-
-// 衝突検出の改善のためのパラメータ
-const int COLLISION_ITERATIONS = 4;        // 衝突検出の反復回数を増やす
-const float MAX_STEP = 0.02;              // 1フレームでの最大移動距離
-const float GRAVITY_SCALE = 0.3;          // 重力スケール（落下速度調整用）
-
-vec3 computeNormal(vec3 pos) {
-    vec3 sdfUV = (pos - sdfMin) / (sdfMax - sdfMin);
-    float eps = 0.5 / float(sdfSize);
-    vec3 d;
-    d.x = texture(sdfTexture, sdfUV + vec3(eps, 0.0, 0.0)).r - 
-          texture(sdfTexture, sdfUV - vec3(eps, 0.0, 0.0)).r;
-    d.y = texture(sdfTexture, sdfUV + vec3(0.0, eps, 0.0)).r - 
-          texture(sdfTexture, sdfUV - vec3(0.0, eps, 0.0)).r;
-    d.z = texture(sdfTexture, sdfUV + vec3(0.0, 0.0, eps)).r - 
-          texture(sdfTexture, sdfUV - vec3(0.0, 0.0, eps)).r;
-    return normalize(d);
-}
-
-float getSDF(vec3 pos) {
-    vec3 sdfUV = (pos - sdfMin) / (sdfMax - sdfMin);
-    if(any(lessThan(sdfUV, vec3(-0.1))) || any(greaterThan(sdfUV, vec3(1.1)))) {
-        return 1000.0;
-    }
-    // SDFの値を補間して滑らかにする
-    vec3 clampedUV = clamp(sdfUV, vec3(0.0), vec3(1.0));
-    float sdfValue = texture(sdfTexture, clampedUV).r;
+        uniform float time;
+        uniform float delta;
+        uniform vec3 gravity;
+        uniform sampler3D sdfTexture;
+        uniform int sdfSize;
+        uniform vec3 sdfMin;
+        uniform vec3 sdfMax;
+        uniform mat4 rotationMatrix;
     
-    // SDFの影響を強める
-    return sdfValue * 0.8; // SDFの値を若干強調
-}
-
-vec3 computeParticleInteraction(vec2 uv, vec3 pos, vec3 vel) {
-    vec3 totalForce = vec3(0.0);
-    float searchRadius = PARTICLE_RADIUS * 4.0;
-    int neighborCount = 0;
+        const float EPSILON = 0.001;
+        const float SDF_BOUNDARY = 0.01;
+        const float MIN_SPEED = 0.001;
+        const float MAX_SPEED = 2.0;
+        const float PARTICLE_RADIUS = 0.02;
     
-    for(float dy = -3.0; dy <= 3.0; dy += 1.0) {
-        for(float dx = -3.0; dx <= 3.0; dx += 1.0) {
-            if(dx == 0.0 && dy == 0.0) continue;
-            
-            vec2 neighborUV = uv + vec2(dx, dy) / resolution.xy;
-            if(any(lessThan(neighborUV, vec2(0.0))) || any(greaterThan(neighborUV, vec2(1.0)))) {
-                continue;
-            }
-            
-            vec4 neighborPosData = texture2D(texturePosition, neighborUV);
-            vec4 neighborVelData = texture2D(textureVelocity, neighborUV);
-            
-            vec3 diff = pos - neighborPosData.xyz;
-            float dist = length(diff);
-            
-            if(dist < searchRadius && dist > 0.0) {
-                // 反発力の計算
-                float influence = 1.0 - dist / searchRadius;
-                influence = influence * influence;
-                totalForce += normalize(diff) * influence * REPULSION_STRENGTH;
-                
-                // 粘性の計算
-                vec3 velDiff = vel - neighborVelData.xyz;
-                totalForce -= velDiff * influence * 0.1;
-                
-                neighborCount++;
-            }
+        // より正確なSDF値の取得
+        float getRawSDF(vec3 pos) {
+            vec3 uv = (pos - sdfMin) / (sdfMax - sdfMin);
+            return texture(sdfTexture, clamp(uv, vec3(0.0), vec3(1.0))).r;
         }
-    }
     
-    return totalForce;
-}
-
-void main() {
-    vec2 uv = gl_FragCoord.xy / resolution.xy;
-    vec4 posData = texture2D(texturePosition, uv);
-    vec4 vel = texture2D(textureVelocity, uv);
-    vec3 pos = posData.xyz;
-    
-    // 回転を考慮した重力の適用（スケールを調整）
-    vec3 rotatedGravity = (rotationMatrix * vec4(gravity * GRAVITY_SCALE, 0.0)).xyz;
-    vec3 force = rotatedGravity;
-    
-    // パーティクル間の相互作用を計算
-    force += computeParticleInteraction(uv, pos, vel.xyz);
-    
-    // 速度の更新（時間刻みを小さくする）
-    float adjustedDelta = min(delta, 0.016); // 最大時間刻みを制限
-    vec3 newVel = vel.xyz + force * (adjustedDelta / PARTICLE_MASS);
-    
-    // 速度の大きさを制限
-    float speedLimit = MAX_STEP / adjustedDelta;
-    float currentSpeed = length(newVel);
-    if(currentSpeed > speedLimit) {
-        newVel = (newVel / currentSpeed) * speedLimit;
-    }
-    
-    // 複数回の衝突チェックを行う
-    vec3 testPos = pos;
-    for(int i = 0; i < COLLISION_ITERATIONS; i++) {
-        // 予測位置の計算
-        vec3 nextPos = testPos + newVel * (adjustedDelta / float(COLLISION_ITERATIONS));
-        float sdf = getSDF(nextPos);
-        
-        if(sdf > -SDF_THRESHOLD) {
-            vec3 normal = computeNormal(testPos);
-            
-            // 衝突応答
-            float penetration = sdf + SDF_THRESHOLD;
-            testPos = nextPos + normal * penetration;
-            
-            // 速度の反射と減衰
-            float normalVel = dot(newVel, normal);
-            if(normalVel < 0.0) {
-                newVel = reflect(newVel, normal) * COLLISION_DAMPING;
-                
-                // 摩擦の適用
-                vec3 tangentVel = newVel - normal * dot(newVel, normal);
-                newVel -= tangentVel * (1.0 - FRICTION);
+        float getSDF(vec3 pos) {
+            // 領域外のチェック
+            vec3 uv = (pos - sdfMin) / (sdfMax - sdfMin);
+            if(any(lessThan(uv, vec3(-0.1))) || any(greaterThan(uv, vec3(1.1)))) {
+                return 1000.0;
             }
-        } else {
-            testPos = nextPos;
+            return getRawSDF(pos);
         }
-    }
     
-    // 最小速度のチェック
-    if(length(newVel) < MIN_VELOCITY) {
-        newVel = vec3(0.0);
-    }
+        vec3 getNormal(vec3 pos) {
+            vec2 e = vec2(EPSILON, 0.0);
+            return normalize(vec3(
+                getSDF(pos + e.xyy) - getSDF(pos - e.xyy),
+                getSDF(pos + e.yxy) - getSDF(pos - e.yxy),
+                getSDF(pos + e.yyx) - getSDF(pos - e.yyx)
+            ));
+        }
     
-    gl_FragColor = vec4(newVel, 1.0);
-}
+        void main() {
+            vec2 uv = gl_FragCoord.xy / resolution.xy;
+            vec4 posData = texture2D(texturePosition, uv);
+            vec4 velData = texture2D(textureVelocity, uv);
+            
+            vec3 pos = posData.xyz;
+            vec3 vel = velData.xyz;
+            
+            // 現在のSDF値を取得
+            float sdf = getSDF(pos);
+            
+            // 重力の適用
+            vec3 rotatedGravity = (rotationMatrix * vec4(gravity, 0.0)).xyz;
+            vec3 newVel = vel + rotatedGravity * delta * 0.5; // 重力を弱める
+            
+            // サブステップによる衝突解決
+            const int SUBSTEPS = 8;
+            float subDelta = delta / float(SUBSTEPS);
+            vec3 currentPos = pos;
+            
+            for(int i = 0; i < SUBSTEPS; i++) {
+                vec3 nextPos = currentPos + newVel * subDelta;
+                float nextSdf = getSDF(nextPos);
+                
+                // 衝突判定と応答
+                if(nextSdf >= -SDF_BOUNDARY) {
+                    vec3 normal = getNormal(currentPos);
+                    
+                    // 衝突応答
+                    float penetration = nextSdf + SDF_BOUNDARY;
+                    nextPos = nextPos - normal * penetration;
+                    
+                    // 速度の反射
+                    float normalVel = dot(newVel, normal);
+                    if(normalVel > 0.0) {
+                        // 反射と減衰
+                        newVel = reflect(newVel, normal) * 0.3; // 強い減衰
+                        
+                        // 摩擦の適用
+                        vec3 tangent = newVel - normal * dot(newVel, normal);
+                        newVel -= tangent * 0.8; // 強い摩擦
+                    }
+                }
+                
+                currentPos = nextPos;
+            }
+            
+            // 速度の制限
+            float speed = length(newVel);
+            if(speed > MAX_SPEED) {
+                newVel = (newVel / speed) * MAX_SPEED;
+            }
+            if(speed < MIN_SPEED) {
+                newVel *= 0.9; // 完全停止を避ける
+            }
+            
+            gl_FragColor = vec4(newVel, 1.0);
+        }
       `;
     };
 
