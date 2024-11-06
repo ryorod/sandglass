@@ -455,28 +455,18 @@ const App: React.FC = () => {
       const center = new THREE.Vector3()
         .addVectors(min, max)
         .multiplyScalar(0.5);
+      const range = new THREE.Vector3().subVectors(max, min);
 
       for (let i = 0; i < data.length; i += 4) {
-        // 上半分のみに配置
-        const x = THREE.MathUtils.lerp(
-          min.x,
-          max.x,
-          0.3 + 0.4 * (Math.random() - 0.5)
-        );
-        const y = THREE.MathUtils.lerp(
-          center.y,
-          max.y,
-          0.2 + 0.6 * Math.random()
-        );
-        const z = THREE.MathUtils.lerp(
-          min.z,
-          max.z,
-          0.3 + 0.4 * (Math.random() - 0.5)
-        );
+        // より狭い範囲に初期配置を集中
+        const x = center.x + (Math.random() - 0.5) * range.x * 0.3;
+        const y = THREE.MathUtils.lerp(center.y, max.y * 0.9, Math.random()); // 上部により集中
+        const z = center.z + (Math.random() - 0.5) * range.z * 0.3;
+
         data[i] = x;
         data[i + 1] = y;
         data[i + 2] = z;
-        data[i + 3] = 1.0;
+        data[i + 3] = 1.0; // 初期状態では外側として設定
       }
     };
 
@@ -713,16 +703,22 @@ void main() {
     const particleFragmentShader = () => {
       return `
         varying float vIsInside;
-
-  void main() {
-    if(vIsInside < 0.0) { // 内側の粒子のみ表示
-      vec3 sandColor = vec3(0.86, 0.83, 0.7);
-      gl_FragColor = vec4(sandColor, 1.0);
-    } else {
-      discard;
-    // gl_FragColor = vec4(0.0,0.0,0.0, 1.0);
-    }
-  }
+    
+        void main() {
+          // パーティクルの形状を円形に
+          vec2 center = gl_PointCoord - vec2(0.5);
+          float dist = length(center);
+          
+          if(dist > 0.5 || vIsInside >= 0.0) {
+            discard;
+          }
+          
+          // より柔らかい砂の色
+          vec3 sandColor = vec3(0.93, 0.87, 0.73);
+          float alpha = smoothstep(0.5, 0.4, dist); // エッジを柔らかく
+          
+          gl_FragColor = vec4(sandColor, alpha);
+        }
       `;
     };
 
