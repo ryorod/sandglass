@@ -518,7 +518,7 @@ const App: React.FC = () => {
     // 速度更新用のシェーダー
     const velocityShader = () => {
       return `
-        uniform float time;
+uniform float time;
 uniform float delta;
 uniform vec3 gravity;
 uniform sampler3D sdfTexture;
@@ -527,19 +527,19 @@ uniform vec3 sdfMin;
 uniform vec3 sdfMax;
 uniform mat4 rotationMatrix;
 
-// 既存のパラメータは維持
-const float COLLISION_DAMPING = 0.3;
-const float FRICTION = 0.95;
-const float PARTICLE_RADIUS = 0.01;
-const int MAX_COLLISION_ITERATIONS = 4;
-const float PARTICLE_MASS = 0.1;
-const float REPULSION_STRENGTH = 1.2;
+// 物理パラメータの調整
+const float COLLISION_DAMPING = 0.3;      // 衝突時の減衰
+const float FRICTION = 0.98;              // 摩擦係数
+const float PARTICLE_RADIUS = 0.015;      // パーティクルサイズ
+const float REPULSION_STRENGTH = 1.5;     // 反発力
+const float PARTICLE_MASS = 0.5;          // 質量を増やして落下速度を調整
 const float MIN_VELOCITY = 0.001;
 const float SDF_THRESHOLD = 0.02;
 
-// 底面処理用の新しいパラメータ
-const float BOTTOM_THRESHOLD = 0.02;
-const float BOTTOM_FRICTION = 0.98;
+// 衝突検出の改善のためのパラメータ
+const int COLLISION_ITERATIONS = 4;        // 衝突検出の反復回数を増やす
+const float MAX_STEP = 0.02;              // 1フレームでの最大移動距離
+const float GRAVITY_SCALE = 0.3;          // 重力スケール（落下速度調整用）
 
 vec3 computeNormal(vec3 pos) {
     vec3 sdfUV = (pos - sdfMin) / (sdfMax - sdfMin);
@@ -554,41 +554,26 @@ vec3 computeNormal(vec3 pos) {
     return normalize(d);
 }
 
-// 内部用のオリジナルのSDF関数
-float getSDF_Internal(vec3 pos) {
+float getSDF(vec3 pos) {
     vec3 sdfUV = (pos - sdfMin) / (sdfMax - sdfMin);
     if(any(lessThan(sdfUV, vec3(-0.1))) || any(greaterThan(sdfUV, vec3(1.1)))) {
         return 1000.0;
     }
-    sdfUV = clamp(sdfUV, vec3(0.0), vec3(1.0));
-    return texture(sdfTexture, sdfUV).r;
-}
-
-float getSDF(vec3 pos) {
-    // 底面付近の特別処理を追加
-    float bottomY = sdfMin.y;
-    float bottomThreshold = bottomY + BOTTOM_THRESHOLD;
+    // SDFの値を補間して滑らかにする
+    vec3 clampedUV = clamp(sdfUV, vec3(0.0), vec3(1.0));
+    float sdfValue = texture(sdfTexture, clampedUV).r;
     
-    if(pos.y <= bottomY) {
-        return -1.0;  // 強制的に内側として扱う
-    }
-    
-    // 底面付近での補間
-    if(pos.y < bottomThreshold) {
-        float t = (pos.y - bottomY) / BOTTOM_THRESHOLD;
-        float regularSDF = getSDF_Internal(pos);
-        return mix(-abs(regularSDF), regularSDF, t);
-    }
-    
-    return getSDF_Internal(pos);
+    // SDFの影響を強める
+    return sdfValue * 0.8; // SDFの値を若干強調
 }
 
 vec3 computeParticleInteraction(vec2 uv, vec3 pos, vec3 vel) {
     vec3 totalForce = vec3(0.0);
-    float searchRadius = PARTICLE_RADIUS * 3.0;
+    float searchRadius = PARTICLE_RADIUS * 4.0;
+    int neighborCount = 0;
     
-    for(float dy = -2.0; dy <= 2.0; dy += 1.0) {
-        for(float dx = -2.0; dx <= 2.0; dx += 1.0) {
+    for(float dy = -3.0; dy <= 3.0; dy += 1.0) {
+        for(float dx = -3.0; dx <= 3.0; dx += 1.0) {
             if(dx == 0.0 && dy == 0.0) continue;
             
             vec2 neighborUV = uv + vec2(dx, dy) / resolution.xy;
@@ -597,15 +582,22 @@ vec3 computeParticleInteraction(vec2 uv, vec3 pos, vec3 vel) {
             }
             
             vec4 neighborPosData = texture2D(texturePosition, neighborUV);
-            if(neighborPosData.w > 0.0) continue;
+            vec4 neighborVelData = texture2D(textureVelocity, neighborUV);
             
             vec3 diff = pos - neighborPosData.xyz;
             float dist = length(diff);
             
             if(dist < searchRadius && dist > 0.0) {
-                float force = 1.0 - dist / searchRadius;
-                force = force * force * REPULSION_STRENGTH;
-                totalForce += normalize(diff) * force;
+                // 反発力の計算
+                float influence = 1.0 - dist / searchRadius;
+                influence = influence * influence;
+                totalForce += normalize(diff) * influence * REPULSION_STRENGTH;
+                
+                // 粘性の計算
+                vec3 velDiff = vel - neighborVelData.xyz;
+                totalForce -= velDiff * influence * 0.1;
+                
+                neighborCount++;
             }
         }
     }
@@ -618,58 +610,55 @@ void main() {
     vec4 posData = texture2D(texturePosition, uv);
     vec4 vel = texture2D(textureVelocity, uv);
     vec3 pos = posData.xyz;
-    bool isInside = posData.w < 0.0;
     
-    if(!isInside) {
-        gl_FragColor = vec4(0.0);
-        return;
+    // 回転を考慮した重力の適用（スケールを調整）
+    vec3 rotatedGravity = (rotationMatrix * vec4(gravity * GRAVITY_SCALE, 0.0)).xyz;
+    vec3 force = rotatedGravity;
+    
+    // パーティクル間の相互作用を計算
+    force += computeParticleInteraction(uv, pos, vel.xyz);
+    
+    // 速度の更新（時間刻みを小さくする）
+    float adjustedDelta = min(delta, 0.016); // 最大時間刻みを制限
+    vec3 newVel = vel.xyz + force * (adjustedDelta / PARTICLE_MASS);
+    
+    // 速度の大きさを制限
+    float speedLimit = MAX_STEP / adjustedDelta;
+    float currentSpeed = length(newVel);
+    if(currentSpeed > speedLimit) {
+        newVel = (newVel / currentSpeed) * speedLimit;
     }
     
-    vec3 rotatedGravity = (rotationMatrix * vec4(gravity, 0.0)).xyz;
-    vec3 totalForce = rotatedGravity;
-    totalForce += computeParticleInteraction(uv, pos, vel.xyz);
-    
-    vec3 newVel = vel.xyz + totalForce * (delta / PARTICLE_MASS);
-    
-    // 底面付近での特別な処理
-    if(pos.y <= sdfMin.y + BOTTOM_THRESHOLD) {
-        // 上向きの速度のみ許可
-        newVel.y = max(0.0, newVel.y);
-        // 水平方向の速度を強く減衰
-        newVel.xz *= BOTTOM_FRICTION;
-        
-        // 完全な停止を防ぐための微小な揺らぎ
-        if(length(newVel) < MIN_VELOCITY) {
-            float rand = fract(sin(dot(uv + vec2(time), vec2(12.9898, 78.233))) * 43758.5453);
-            newVel.xz += (vec2(rand) - 0.5) * 0.0002;
-        }
-    } else {
-        newVel *= FRICTION;
-    }
-    
-    // 衝突処理
+    // 複数回の衝突チェックを行う
     vec3 testPos = pos;
-    for(int i = 0; i < MAX_COLLISION_ITERATIONS; i++) {
-        testPos += newVel * (delta / float(MAX_COLLISION_ITERATIONS));
-        float sdf = getSDF(testPos);
+    for(int i = 0; i < COLLISION_ITERATIONS; i++) {
+        // 予測位置の計算
+        vec3 nextPos = testPos + newVel * (adjustedDelta / float(COLLISION_ITERATIONS));
+        float sdf = getSDF(nextPos);
         
-        if(sdf >= -SDF_THRESHOLD) {
+        if(sdf > -SDF_THRESHOLD) {
             vec3 normal = computeNormal(testPos);
             
-            // 押し戻し
-            testPos += normal * (sdf + SDF_THRESHOLD);
+            // 衝突応答
+            float penetration = sdf + SDF_THRESHOLD;
+            testPos = nextPos + normal * penetration;
             
+            // 速度の反射と減衰
             float normalVel = dot(newVel, normal);
-            if(normalVel > 0.0) {
-                newVel = reflect(newVel, -normal) * COLLISION_DAMPING;
+            if(normalVel < 0.0) {
+                newVel = reflect(newVel, normal) * COLLISION_DAMPING;
+                
+                // 摩擦の適用
                 vec3 tangentVel = newVel - normal * dot(newVel, normal);
                 newVel -= tangentVel * (1.0 - FRICTION);
             }
+        } else {
+            testPos = nextPos;
         }
     }
     
-    // 静止判定（底面以外）
-    if(length(newVel) < MIN_VELOCITY && pos.y > sdfMin.y + BOTTOM_THRESHOLD) {
+    // 最小速度のチェック
+    if(length(newVel) < MIN_VELOCITY) {
         newVel = vec3(0.0);
     }
     
